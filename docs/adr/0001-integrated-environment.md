@@ -184,6 +184,8 @@ GitHub carries branches, commits and PRs. Handoff summaries are written as artif
 
 ## 12. Roadmap
 
+> **Superseded by [ADR 0002](0002-feature-first-roadmap.md).** The order below was replaced by a feature-first order: M2 feature end to end, M3 close the loop, M4 accounts and routing, M5 headless. The table is kept for history.
+
 | Milestone | Deliverables | Status |
 |---|---|---|
 | **M1** Product foundation and TUI | ADR; data directory; global project registry with `aw projects`; live snapshot service; Ink TUI (sidebar, projects, agents, branches/PRs, attach/start/stop/restart, logs, diff, help, empty states); `aw` opens the TUI; all CLI commands unchanged | **Done** |
