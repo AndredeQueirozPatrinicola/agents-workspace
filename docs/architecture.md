@@ -149,3 +149,24 @@ Every step is designed so that a crash at any point leaves a state that `aw` can
 | Untrusted committed config | Warnings for custom provider executables and sandbox-disabling flags. |
 | WSL2 performance on `/mnt/c` | `aw doctor` warns; docs recommend the Linux filesystem. |
 | Git versions | `--path-format=absolute` needs 2.31 (checked by doctor); merge simulation degrades gracefully below 2.38. |
+
+## Features, routing and accounts (ADR 0002)
+
+```
+core/features/
+  plan.ts      plan schema (strict JSON schema for the CLIs + zod), checks, waves, task files
+  planner.ts   planner prompt; runs the provider's exec command (read-only, schema-constrained)
+  store.ts     feature.json / events.jsonl under <git-common-dir>/agent-workspace/features/<id>/
+  agents.ts    feature tasks → agent definitions merged into the config in memory
+  service.ts   create, plan, review, approve, advance (conductor step), validate, integrate, PR, cleanup
+  format.ts    plain-text views shared by the CLI and the TUI
+core/routing/router.ts      rules → account, provider, model, effort + reason (policy-aware)
+core/accounts/              settings.yaml (accounts, rules), availability marks, AccountService
+core/agents/handoff.ts      account switch: relaunch in place with a Git/terminal handoff
+providers/*                 effort flags, account env vars, buildExecCommand/parseExecResult
+```
+
+- **Conductor.** `aw feature watch` runs in a tmux session (`aw-<project>-<id>--conductor`). The session starts on approval, and again when the dashboard sees running features without one. Every few seconds it calls `FeatureService.advance()` for each running feature. That step is idempotent and guarded by a per-feature lock, so a CLI call (`aw feature watch --once`) and the conductor never race.
+- **Status contract.** Feature task agents write `status.json` in their outbox (shared files area). The conductor consumes it by renaming it, so each report is handled once.
+- **Integration worktree.** `<workspace dir>/.integration/<feature>`, checked out on the feature branch. Only `git merge --no-ff` and `git merge --abort` (of its own merge) run there.
+- **Feature agents** reuse every agent mechanism: worktrees, tmux, restart, tell, sync, cleanup. `openWorkspace()` merges them into `config.agents`. Their task files live in runtime state (`Workspace.taskRoots`).

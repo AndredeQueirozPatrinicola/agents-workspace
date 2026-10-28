@@ -4,22 +4,31 @@ A local-first CLI for running several AI coding agents (OpenAI Codex CLI, Anthro
 
 Each agent gets its own Git worktree, branch, tmux session, task brief and runtime metadata. You get one place to start, watch, attach to, stop, review and publish all of them.
 
+**Describe a feature once; agents do the rest.** Write the request the way you would to Claude or Codex. A planner (Claude Code or Codex, read-only) reads the repository and proposes tasks. Each task gets an account, an effort level and the reason for both. You approve once. Agents then work in parallel on their own branches, a conductor validates each task, and the validated work lands in **one feature branch and one PR**. You are interrupted only when a decision is needed.
+
 ```sh
 cd ~/projects/my-saas
 aw init
+aw                  # the dashboard; press n and describe the feature
 
-aw spawn database --provider claude --task "Model orgs, users, roles and projects with migrations"
+# or from the command line:
+aw feature new "Add JWT login to the admin panel. Follow docs/auth.md; tokens in httpOnly cookies."
+aw feature approve add-jwt-login     # after reviewing (and adjusting) the plan
+aw feature pr add-jwt-login          # when every task is validated and integrated
+```
+
+Manual agents still work exactly as before:
+
+```sh
 aw spawn backend  --provider codex  --task "CRUD API for users and projects"
-aw spawn auth     --provider claude --task "JWT login with refresh-token rotation"
-
-aw dashboard        # tmux grid of every running agent
+aw spawn auth     --provider claude --account claude-work --effort high --task "JWT login with refresh-token rotation"
 aw check            # overlaps, stale branches, simulated merge conflicts
 aw pr backend       # push + draft PR, after confirmation
 ```
 
 No cloud service, no daemon, no database, no custom IDE. `aw` orchestrates tools you already use: `git`, `tmux`, `gh`, `codex`, `claude`.
 
-**Roadmap:** Agent Workspace is evolving into an integrated environment: describe a feature, review a plan, and watch agents execute it in parallel. See [ADR 0001](docs/adr/0001-integrated-environment.md). Milestone 1 (the dashboard and project registry) is done.
+**Design:** see [ADR 0002](docs/adr/0002-feature-first-roadmap.md) (the feature flow, routing and accounts) and [ADR 0001](docs/adr/0001-integrated-environment.md) (architecture). Done: the dashboard and project registry, the end-to-end feature flow, closing the loop (validation and integration), and accounts and routing. Next: headless execution, token accounting and budgets.
 
 **New here? Read [`docs/daily-workflow.md`](docs/daily-workflow.md)**: the daily loop, dashboard keys, recovering an agent that quit, writing good task files, and handling conflicts.
 
@@ -33,6 +42,8 @@ No cloud service, no daemon, no database, no custom IDE. `aw` orchestrates tools
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [The dashboard (`aw`)](#the-dashboard-aw)
+- [Features: from a request to one PR](#features-from-a-request-to-one-pr)
+- [Accounts, models and effort](#accounts-models-and-effort)
 - [Command reference](#command-reference)
 - [Configuration reference](#configuration-reference)
 - [Task files and agent context](#task-files-and-agent-context)
@@ -210,8 +221,8 @@ Agent Workspace · my-saas · 2/3 running                                       
 │ 1 Overview   ││ my-saas                                                              │
 │ 2 Projects   ││ ~/projects/my-saas · base main · remote origin                       │
 │ 3 Features   ││ 3 agent(s): 2 running · 1 exited · 0 stopped · 0 not started         │
-│ 4 Agents     ││ Needs attention                                                      │
-│ 5 Accounts   ││ • auth: agent exited (1), press r to restart                         │
+│ 4 Agents     ││ Needs you                                                            │
+│ 5 Accounts   ││ ◆ jwt-auth/api asks: RS256 or HS256?                                 │
 │ 6 Activity   ││ Agents                                                               │
 │ 7 Settings   ││ AGENT     PROVIDER STATE        BRANCH          VS BASE  CHANGES  PR │
 │              ││ database  claude   ● running    agent/database  ↑1 ↓0    clean    -  │
@@ -220,21 +231,75 @@ t attach · s start · x stop · r restart · R resume · l logs · d diff · en
 ```
 
 - **Projects** (`2`, or `p` anywhere): register Git repositories by path (`+`); they are used in place, never copied. Switch between them, forget them (`-`, which leaves the repository untouched), initialize `.agents/` (`I`, from any view), or open a shell in one (`o`, from any view). Initialized repositories also register themselves whenever you run an `aw` command inside them. The registry lives in the machine-local data directory: `$AW_DATA_DIR`, `$XDG_DATA_HOME/agent-workspace`, `~/.local/share/agent-workspace`, or on macOS `~/Library/Application Support/agent-workspace`.
-- **Agents** (`a`): each agent shows its provider, profile, model, effort, task, state, worktree, branch, ahead/behind, changes, last activity, exit status and PR. Keys:
+- **Sidebar:** the views, then a tree of your projects. Under the selected project it lists its features (`◆` plan to review, `●` running with progress, `!` needs you, `✓` ready) and the tasks of each running feature.
+- **New feature** (`n`, from any view): describe it; planning runs in the background (in tmux, so it survives quitting `aw`). See [Features](#features-from-a-request-to-one-pr).
+- **Features** (`3`): the list of features, and with `enter`, the plan view of one: waves, tasks with their account, effort and the reason, the planner's questions and warnings, task progress, reports and validation results. Keys in the plan view:
+  - review: `A` approve, `f` re-plan with feedback, `c` account, `e` effort, `space` skip a task;
+  - running: `w` answer a blocked task, `r` retry, `i` integrate (confirm mode), `c` switch the agent's account, `t`/`l`/`d` attach, logs, diff;
+  - ready: `P` push and open the PR (asks first), `C` clean up the worktrees; `X` cancels, `v` shows everything including recent events.
+- **Accounts** (`5`): your accounts, whether the selected project allows them, whether they are logged in, and limited marks. Keys: `m` marks or unmarks an account as limited, `L` logs in (runs the CLI's own login with the account's directory), `E` edits accounts and routing rules. The view also shows routing results: how often each effort level passed validation the first time.
+- **Agents** (`a`): each agent shows its feature (or "manual"), account, model, effort, task, state, worktree, branch, ahead/behind, changes, last activity, exit status and PR. Agents are grouped by feature. Keys:
   - `+` creates an agent (name, provider, task) and starts it in its own worktree and branch.
   - `t` attaches to the agent's tmux session; detach with `Ctrl-b d` to come back to the dashboard.
   - `s` starts it, `x` stops it (asks first), `r` restarts it in the same session, `R` restarts and resumes the conversation.
   - `l` shows its terminal output, `d` shows its diff (commits, changed files, uncommitted changes).
-- **Overview** (`1`): what needs attention (exited agents, conflicts, branches behind base), the agents table, and branches with their PRs. `g` refreshes PR status from GitHub through `gh`.
-- **Features, Accounts, Activity, Settings**:
-  - Features shows natural-language planning (Milestone 3).
-  - Accounts shows detected CLIs and the "default" profile; named profiles arrive in Milestone 2.
-  - Activity lists what you did in this session.
-  - Settings shows the data directory and tmux settings.
+  - `c` continues the agent on another account, with a handoff.
+- **Overview** (`1`) shows four things:
+  - **Needs you:** plans to review, blocked tasks and their questions, tasks needing attention, and features ready for a PR.
+  - Exited agents and conflicts.
+  - The agents table.
+  - Branches with their PRs. `g` refreshes PR status from GitHub through `gh`.
+- **Activity, Settings:** Activity lists what you did in this session. Settings shows the data directory and tmux settings.
 - **Keys:** `tab` switches between the sidebar and the main panel, `1`–`7` jump to a view, `↑↓`/`j k` move, `enter` inspects, `?` shows help, `q` quits. Below 90 columns the sidebar becomes a one-line tab bar.
 - **Safety:** quitting the dashboard never stops agents, since they live in tmux. Stopping or restarting a running agent and forgetting a project always ask for confirmation. Live data refreshes every 3 seconds.
 
 The tmux grid from earlier versions is still available as `aw dashboard`.
+
+## Features: from a request to one PR
+
+1. **Describe.** Press `n` in the dashboard, or run `aw feature new "…"` (`-f request.md` for long text). Write it the way you would to an agent: the goal, the context, files to look at, constraints. Semi-structured is fine.
+2. **Plan.** A planner runs once, **read-only**, in your main checkout: `codex exec --sandbox read-only --output-schema …` or `claude -p --permission-mode plan --json-schema …`. It reads the code, `AGENTS.md`/`CLAUDE.md` and the files you mention. It answers with a validated plan: tasks with objective, context, scope, dependencies, acceptance criteria, validation commands, and a complexity/risk rating with a reason. The planner is told to split work **only when it pays**, so a cohesive feature is one task, and most plans have 1–4. `aw` rejects unknown dependencies, cycles and bad ids, and warns about parallel tasks touching the same files.
+3. **Review.** Every task shows its account, effort and *why*, for example `rule 1 (risk high) → claude-work, effort high`. In review you can:
+   - change a task's account (`c`) or effort (`e`), or skip it (`space`);
+   - re-plan with feedback (`f`, or `aw feature plan <id> --feedback "…"`).
+   Nothing touches the repository before you approve.
+4. **Approve** (`A`, or `aw feature approve <id>`). This is the one mandatory checkpoint. It creates the branch `feature/<id>` from the base branch, and a **conductor** starts in tmux (`aw feature watch`). The conductor:
+   - starts tasks in waves (up to `features.maxParallel`). Dependent tasks branch from the updated feature branch, so they see their dependencies' code.
+   - reads each agent's report from its outbox: `{"status": "done"|"blocked", …}`. The agents' prompt asks them to commit and write it.
+   - for a **blocked** task: shows the questions under "Needs you". Your answer (`w`, or `aw feature answer`) is typed into the agent.
+   - for a **done** task: checks it is committed and runs its validation commands in its worktree. A failure goes back to the agent with the output. After two failures it asks you.
+   - **integrates** validated tasks into the feature branch with `git merge --no-ff`, in an integration worktree. It never touches `main`. On a conflict it undoes only its own merge, merges the feature branch into the task's branch with `aw sync`, and asks the agent to resolve it.
+   - notices agents that exit without reporting, or whose terminal shows a usage-limit message, and asks you.
+5. **Publish.** When every task is integrated, the feature is *ready*. `P` (or `aw feature pr <id>`) pushes the feature branch after a secret scan and your confirmation, then opens one PR. Its description lists every task, its report and its validation. Nothing is merged automatically. `C` (`aw feature cleanup`) removes the clean worktrees afterwards; branches stay.
+
+Feature tasks are ordinary agents: `t` attaches, you can talk to them, `aw status` lists them. They are defined in runtime state, so `.agents/workspace.yaml` and your working tree stay untouched. `features.integrate: confirm` makes validated tasks wait for `i` instead of merging automatically.
+
+## Accounts, models and effort
+
+Accounts are isolated logins of the agent CLIs: a provider plus its configuration directory (`CODEX_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude Code). They are declared in the machine-local `settings.yaml` in the data directory. `aw accounts edit` opens it, with a commented template.
+
+```yaml
+accounts:
+  codex-personal: { provider: codex, home: ~/.codex-personal, tags: [personal] }
+  codex-work:     { provider: codex, home: ~/.codex,          tags: [work] }
+  claude-work:    { provider: claude, home: ~/.claude,        tags: [work] }
+
+routing:
+  planner: { account: claude-work, effort: high }
+  rules:                         # first match wins; the planner rates every task
+    - when: { risk: high }
+      use: { account: claude-work, effort: high }
+    - when: { complexity: low }
+      use: { account: codex-personal, effort: low }
+    - when: { complexity: [medium, high] }
+      use: { account: codex-work, effort: high }
+```
+
+- **Log in once per account:** `aw accounts login codex-personal` runs the CLI's own login with that directory. Agent Workspace never reads, copies or stores credentials. Each provider also has an implicit account named after it (`codex`, `claude`) that uses the CLI's default login.
+- **Project policy:** `accounts: [work]` in `.agents/workspace.yaml` allows only those accounts (names or tags). The router never picks a disallowed account, and the dashboard won't let you pick one either.
+- **Effort** is passed as `--effort` to Claude Code and as `-c model_reasoning_effort=…` to Codex (`max` maps to Codex's `xhigh`). Without rules, effort follows the task's rating: low, medium or high.
+- **Out of credits?** Accounts are never rotated automatically. Mark one with `aw accounts limited codex-work --until 18:00`, or press `m` in Accounts; plans then warn about it. When a running agent hits a limit, the conductor flags it. Press `c` on the agent, or run `aw switch <agent> <account>`, to continue on another account. Conversations live inside each account's directory and cannot move, so the agent is relaunched in the same worktree with a **handoff**: the task, its commits, the diff stat, uncommitted files, its last report and the tail of its terminal. The work is in Git, so nothing is lost.
+- **Learning from results:** `aw accounts stats` (and the Accounts view) shows the first-pass validation rate per complexity, provider and effort, to tune your rules with data.
 
 ## Command reference
 
@@ -244,12 +309,21 @@ Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbo
 |---------|--------------|
 | `aw` / `aw ui` | Opens the interactive dashboard (see above). Without a terminal, `aw` prints help. |
 | `aw projects [list\|add [path]\|remove <project>] [--json]` | Global registry of known repositories on this machine. `add` registers a repository in place; `remove` forgets it without touching it. |
+| `aw feature new [request...] [-f file] [--planner p] [--background] [--no-plan]` | Creates a feature from a natural-language request and plans it (read-only planner). |
+| `aw feature [list] \| show <f> [--json]` | Features of this project / plan, routing reasons, task progress and recent events. |
+| `aw feature plan <f> [--feedback text] [--background]` | Re-plans a feature before approval. |
+| `aw feature route <f> <task> [--account a] [--effort e]` · `skip <f> <task> [--undo]` | Adjusts the plan during review. |
+| `aw feature approve <f>` | Creates the feature branch and starts the conductor (tasks start in waves). |
+| `aw feature answer <f> <task> <text...>` · `retry <f> <task>` · `integrate <f> <task>` | Answers a blocked task, puts a task back to work, merges a validated task (confirm mode). |
+| `aw feature pr <f> [--draft\|--ready] [-y]` · `cancel <f>` · `cleanup <f>` · `watch [--once]` | One PR for the feature / stop it / remove clean worktrees / run the conductor in the foreground. |
+| `aw accounts [list\|add\|login\|edit\|limited\|available\|stats]` | Accounts (isolated CLI logins), availability marks and routing statistics. |
+| `aw switch <agent> <account> [--effort e] [-y]` | Continues an agent on another account (relaunch in place with a handoff summary). |
 | `aw doctor [--json]` | Checks platform, Node, git, tmux, gh (and auth), Codex/Claude (installed, version, expected flags), and the current repository/config. Exit 3 if something required is missing. |
 | `aw init [--name] [--base] [--provider] [--remote]` | Creates `.agents/workspace.yaml`, `.agents/README.md`, `.agents/tasks/`. Never overwrites. |
 | `aw add <agent> [-p] [-b] [-m] [-t text] [-d] [--scope globs] [--depends-on agents]` | Adds an agent to the config and creates its task file, without starting it. |
 | `aw spawn <agent> [options] [-- provider args]` | Creates/reuses the worktree + branch and starts the agent in tmux. Idempotent: if it is already running, prints how to attach. |
 | `aw attach <agent>` | Attaches your terminal to the agent's session (switches client when already inside tmux). |
-| `aw restart <agent> [-r] [--prompt] [--no-prompt] [-y]` | Relaunches the agent **in its existing tmux session** (dashboard panes and attached terminals stay connected). Use it after a failed login, an accidental Ctrl-C or a crash; asks before interrupting a running agent. `-r` continues the previous conversation. |
+| `aw restart <agent> [-r] [--prompt] [--no-prompt] [--effort e] [-y]` | Relaunches the agent **in its existing tmux session** (dashboard panes and attached terminals stay connected). Use it after a failed login, an accidental Ctrl-C or a crash; asks before interrupting a running agent. `-r` continues the previous conversation. |
 | `aw tell <agent> <message...>` | Types a message into a running agent and presses Enter. Refused if the agent has exited (its pane is then a shell). |
 | `aw sync <agent> [--ask-agent] [--no-fetch] [-y]` | `git merge` of the base branch into the agent's branch, inside its worktree (never rebase). Refuses with uncommitted changes; on conflicts the merge is left paused and listed, and `--ask-agent` hands it to the agent to resolve, test and commit. Exit 4 on unresolved conflicts. |
 | `aw files [list\|add\|path]` | Shared files area outside the repo: `aw files add <file...> [--agent x] [--tell]` puts inputs in the inbox, `aw files` lists inbox and outboxes, `aw files path [--agent x] [--outbox]` prints a path. See [Files](#files-inputs-and-outputs). |
@@ -279,6 +353,8 @@ Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbo
 | `-a, --attach` | attach right after starting |
 | `-y, --yes` | consent to adopting an existing worktree that aw did not create (see below) |
 | `-f, --file <path>` | input file/folder for the agent: copied to its inbox and listed in the prompt (repeatable) |
+| `--account <name>` | account to launch with (default: the last one used by this agent, else the CLI's own login) |
+| `--effort <level>` | `low`, `medium`, `high`, `xhigh` or `max` (default: the last one used, else the CLI default) |
 | `-- <args...>` | passed verbatim to the provider CLI, e.g. `aw spawn api -- --sandbox workspace-write` |
 
 **Exit codes:** `0` success · `1` error · `2` usage or invalid configuration · `3` missing prerequisite (tool not installed, gh not authenticated, no remote) · `4` safety refusal (dirty worktree, busy agent, branch conflict, possible secrets, `check --strict` errors) · `130` declined confirmation / interrupted.
@@ -308,6 +384,13 @@ defaults:
   createDraftPR: true            # aw pr creates drafts unless --no-draft
   autoCommit: false              # not implemented; agents commit their own work (true => warning)
   autoMerge: false               # must be false: aw never merges PRs
+
+accounts: [work]                 # optional: accounts allowed in this project (names or tags from settings.yaml)
+
+features:                        # optional
+  integrate: auto                # auto | confirm: merge validated tasks into the feature branch automatically or after "i"
+  maxParallel: 3                 # feature tasks running at the same time (1-8)
+  branchPrefix: feature/         # feature branch = <prefix><id>; tasks use <prefix><id>--<task>
 
 providers:                       # optional, per provider
   codex:
@@ -348,7 +431,11 @@ If you point `workspace.directory` inside the repository, add it to `.gitignore`
 
 **Runtime state** (machine-specific: absolute paths, tmux session names, launch scripts, prompts, PR cache, locks) lives in `<git-common-dir>/agent-workspace/`, i.e. `.git/agent-workspace/` for normal clones. It is shared by all worktrees of the clone, never committed, and disposable: `aw repair` rebuilds what matters from Git itself.
 
-**Environment variables:** `AW_WORKSPACE_DIR` (worktree root override), `AW_TMUX_SOCKET` (use a separate tmux server, `tmux -L <name>`), `AW_DEBUG=1` (debug logs), `NO_COLOR` / `FORCE_COLOR`, `AW_ASCII=1` (ASCII symbols instead of ✓ ✗ ●).
+**Features** (requests, plans, task progress, events, planner output) also live there, in `features/<id>/`.
+
+**User settings** (accounts and routing rules, see [Accounts](#accounts-models-and-effort)) live in `settings.yaml` in the data directory, next to the project registry and the account marks (`accounts-state.json`). They are per machine and never in a repository.
+
+**Environment variables:** `AW_DATA_DIR` (data directory), `AW_WORKSPACE_DIR` (worktree root override), `AW_TMUX_SOCKET` (use a separate tmux server, `tmux -L <name>`), `AW_DEBUG=1` (debug logs), `NO_COLOR` / `FORCE_COLOR`, `AW_ASCII=1` (ASCII symbols instead of ✓ ✗ ●).
 
 ## Task files and agent context
 
@@ -566,7 +653,10 @@ Design choices, the state model and the risk analysis are in [`docs/architecture
 - `aw stop` interrupts with Ctrl-C and then closes the session; an agent mid-edit may leave partial (uncommitted, preserved) changes.
 - Secret scanning is a best-effort heuristic, not a replacement for a dedicated scanner or GitHub push protection.
 - Scope overlap uses conservative glob-prefix comparison; it can report possible overlaps that never materialize.
-- Dependency state is derived from PR state cached by `aw pr` / `aw pr status`; there is no scheduler.
+- For manual agents, dependency state is derived from PR state cached by `aw pr` / `aw pr status`. Feature tasks are scheduled by the conductor.
+- The conductor polls every 5 seconds and validates tasks one at a time; a long validation delays the others.
+- Usage limits are detected from the agent's terminal text (best effort); provider quotas are not queried.
+- Agents run interactively in tmux with their normal permission prompts; a task waiting for an approval in its terminal looks "running" until you attach (`t`).
 - PRs from forks (`owner:branch` heads) are not supported; the branch is pushed to the configured remote.
 - `autoCommit` is accepted but not implemented (agents commit their own work).
 - The dashboard nests tmux clients; very small terminals give cramped panes (use `--per-window`).
@@ -581,6 +671,8 @@ Design choices, the state model and the risk analysis are in [`docs/architecture
 - **Confirmation for outward/destructive actions** (push, stop a running agent, cleanup, prune); non-interactive runs require an explicit `--yes`.
 - **Publication guard.** `aw pr` scans every commit it would push for sensitive files and likely secrets and blocks unless `--allow-sensitive`.
 - **Versioned config is input from whoever committed it.** `providers.<id>.command` and `args` in a cloned repository choose what runs. `aw spawn` warns when the config sets a custom executable or passes flags that disable an agent's sandbox/approvals (e.g. `--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`). Review `.agents/workspace.yaml` before spawning in repositories you don't trust.
+- **Accounts:** `settings.yaml` stores only account names, providers and configuration directory paths. Logins happen in the CLIs; nothing is read from those directories. Project policies (`accounts:`) are enforced for planning, routing, launches and switches.
+- **Feature automation stays local.** The conductor runs your plan's validation commands (approved by you) in the task worktrees, merges only into the local feature branch, and never pushes. Publishing is `aw feature pr`, with confirmation and a secret scan.
 - **Agents themselves are powerful.** Each agent CLI runs with your user's permissions in its worktree; worktrees isolate files, not processes. Use the providers' sandbox/approval settings and review every PR.
 
 ## Development

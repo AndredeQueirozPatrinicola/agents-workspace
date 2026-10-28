@@ -1,8 +1,47 @@
 # Daily workflow
 
-A practical guide to using `aw` every day: the loop, the keys, recovering agents, writing better tasks, and handling conflicts.
+A practical guide to using `aw` every day: the feature loop, the keys, accounts, recovering agents, writing better tasks, and handling conflicts.
 
-## The daily loop
+## The feature loop (start here)
+
+You keep working the way you already do with Claude or Codex: describe what you want. The difference is that `aw` turns it into parallel work and brings it back as one branch.
+
+1. `aw` in the repository, then `n`. Write the request with context and file references, e.g. *"Add JWT login to the admin panel. Follow docs/auth.md; tokens in httpOnly cookies; reuse src/http/client.ts."* Planning runs in the background (1–5 min). You can keep working or quit.
+2. The sidebar shows `◆ add-jwt-login` when the plan is ready. Press `enter` on it in Features (`3`) and look at three things:
+   - **The tasks.** Is the split sensible? One task is often the right answer.
+   - **The routing.** Account, effort and why. Change them with `c` and `e`.
+   - **The planner's questions.** Answer them with `f` (re-plan with feedback) if they matter.
+3. `A` to approve. Go do something else.
+4. Come back when "Needs you" (Overview) or a `!` in the sidebar says so:
+   - a question: `w` answers it;
+   - a problem (validation failed twice, agent exited, usage limit): `t` attaches, `r` retries, `c` switches account.
+5. When the feature is `✓ ready`, review it: `d` on a task, or `git diff main...feature/<id>` in the `o` shell. Then `P` opens the PR, and after the merge `C` cleans up.
+
+When to use a manual agent (`+` in Agents) instead: tiny, one-off jobs, or when you want to drive one agent yourself from the start.
+
+Tips for good requests:
+
+- Say what "done" looks like (behavior, tests), not the steps.
+- Mention the files, docs and decisions the planner must respect. It reads them.
+- Put strong opinions about effort in the request ("this is delicate auth code"). The planner's risk rating drives effort.
+- Long requests: write them in a file and run `aw feature new -f request.md`.
+
+## Accounts in practice
+
+```sh
+aw accounts add codex-personal --provider codex --home ~/.codex-personal --tag personal
+aw accounts add codex-work     --provider codex --home ~/.codex          --tag work
+aw accounts add claude-work    --provider claude --home ~/.claude         --tag work
+aw accounts login codex-personal       # once per account: the CLI's own login
+aw accounts edit                       # routing rules: which account/effort for which kind of task
+```
+
+In a work repository, add `accounts: [work]` to `.agents/workspace.yaml`: personal accounts can then never be chosen there. When an account runs out of credits:
+
+- Press `m` in Accounts (or run `aw accounts limited <name> --until 18:00`) so new plans warn about it.
+- Press `c` on the agent that stopped to continue it on another account. The new session gets a handoff summary from Git and the old terminal; the code is already in the worktree.
+
+## The daily loop (CLI)
 
 ```sh
 cd ~/Projetos/my-saas
@@ -25,6 +64,9 @@ Everything below can be done without leaving `aw`:
 | Step | Keys |
 |------|------|
 | Open the dashboard | `aw` (in any directory; inside an initialized repo it selects that project) |
+| Describe a feature | `n` anywhere → plan in Features (`3`) → `A` approve |
+| Answer / unblock / switch account | Overview "Needs you" → `3`, `enter`, select the task → `w` / `r` / `c` |
+| Publish a ready feature | `P` in its plan view (push + PR after confirmation), later `C` to clean up |
 | Register a repository | `2` (Projects) → `+` → type the path → `enter` |
 | Select it | `enter` on the row, or `p` from anywhere |
 | Initialize it (creates `.agents/`) | `I`, in any view. A repository with no commits needs one first: `o`, then `git add .agents && git commit -m "Add Agent Workspace"`, then `exit` |
@@ -217,3 +259,7 @@ The agent is usually the best resolver: it knows why it wrote its side, and it c
 | publish its work | `aw pr <agent>` |
 | finish it | `aw cleanup <agent> --delete-branch` |
 | stop it for today | `aw stop <agent>` (resume tomorrow: `aw spawn <agent> --resume`) |
+| describe a feature | `aw feature new "..."` → `aw feature approve <f>` → `aw feature pr <f>` |
+| answer a blocked task | `aw feature answer <f> <task> "..."` |
+| continue on another account | `aw switch <agent> <account>` |
+| mark an account out of credits | `aw accounts limited <name> --until 18:00` |

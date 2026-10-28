@@ -1,6 +1,6 @@
 {
   "name": "agent-workspace",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-first multi-agent development environment: Codex and Claude Code agents in parallel Git worktrees, tmux sessions and an interactive terminal dashboard.",
   "license": "MIT",
   "type": "module",
