@@ -89,7 +89,8 @@ export class JsonProjectRegistry implements ProjectRegistry {
   }
 
   async list(): Promise<ProjectRecord[]> {
-    return (await this.read()).sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt) || a.name.localeCompare(b.name));
+    // Stable alphabetical order: frontends keep their cursor when projects are added.
+    return (await this.read()).sort((a, b) => a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
   }
 
   async get(idOrName: string): Promise<ProjectRecord | undefined> {

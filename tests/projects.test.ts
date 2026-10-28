@@ -108,3 +108,15 @@ describe('aw projects', () => {
     expect((await aw(['projects', 'remove', 'beta'], a, dataDir)).code).toBe(2);
   });
 });
+
+describe('aw entry point', () => {
+  it('prints help without a terminal, refuses "aw ui" in scripts and reports unknown commands', async () => {
+    const ui = captureUi();
+    const deps = { cwd: tempDir(), ui, prompter: new ScriptedPrompter(false) };
+    expect(await runCli(['node', 'aw'], deps)).toBe(0);
+    expect(await runCli(['node', 'aw', 'ui'], deps)).toBe(2);
+    expect(ui.text()).toMatch(/needs an interactive terminal/);
+    expect(await runCli(['node', 'aw', 'bogus'], deps)).toBe(2);
+    expect(ui.text()).toMatch(/Unknown command "bogus"/);
+  });
+});

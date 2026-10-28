@@ -85,6 +85,30 @@ Typical workflow:
 Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety check, 130 aborted.`,
     );
 
+  // ------------------------------------------------------------------ ui
+  const interactive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  const openTui = async () => {
+    const { runTui } = await import('../tui/run.js'); // loaded lazily: keeps plain CLI commands fast
+    context.exitCode = await runTui(getDeps());
+  };
+  // `aw` with no command: the dashboard in a terminal, help otherwise (scripts are unaffected).
+  program.action(async () => {
+    if (program.args.length) {
+      throw new AwError(`Unknown command "${program.args[0]}".`, { exitCode: ExitCode.USAGE, hint: 'Run "aw --help" for the list of commands.' });
+    }
+    if (interactive() && !getDeps().env.AW_NO_TUI) await openTui();
+    else program.outputHelp();
+  });
+  program
+    .command('ui')
+    .description('open the interactive dashboard (also what plain "aw" does in a terminal)')
+    .action(async () => {
+      if (!interactive()) {
+        throw new AwError('"aw ui" needs an interactive terminal.', { exitCode: ExitCode.USAGE, hint: 'Use "aw status --json" in scripts.' });
+      }
+      await openTui();
+    });
+
   // ----------------------------------------------------------- projects
   const projects = program
     .command('projects')
@@ -493,6 +517,9 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
       }
     });
 
+  // Only the root command accepts stray words (to report "Unknown command" itself);
+  // set last so subcommands keep commander's strict argument checking.
+  program.allowExcessArguments(true);
   return program;
 }
 
