@@ -14,6 +14,8 @@ import { validateAgentName } from '../core/config/loader.js';
 import { displayPath } from '../infrastructure/filesystem/fs.js';
 import { logger } from '../infrastructure/logger.js';
 import { packageVersion } from '../infrastructure/filesystem/package-root.js';
+import { registerFeatureCommands } from './feature-commands.js';
+import { EFFORTS, type Effort } from '../core/accounts/settings.js';
 import { renderCheck, renderDoctor, renderFiles, renderPrStatus, renderProjects, renderStatus } from './render.js';
 
 /**
@@ -77,8 +79,11 @@ export function buildProgram(baseDeps: Partial<Deps> = {}, context: ProgramConte
       `
 Typical workflow:
   aw init
+  aw feature new "Add JWT login to the admin panel; follow docs/auth.md"   # plan → review
+  aw feature approve <feature>                                             # agents run, aw integrates
+  aw feature pr <feature>
+Manual agents:
   aw spawn backend --provider codex --task "Build the REST API"
-  aw spawn auth --provider claude
   aw dashboard
   aw pr backend --draft
 
@@ -227,11 +232,13 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .option('-a, --attach', 'attach to the session after starting it')
     .option('-y, --yes', 'answer yes to confirmations (e.g. adopting an existing worktree)')
     .option('-f, --file <path>', 'input file or folder for the agent (copied to its inbox, listed in the prompt; repeatable)', collect)
+    .option('--account <name>', 'account to launch with (aw accounts); default: the last one used, else the CLI login')
+    .addOption(new Option('--effort <level>', 'reasoning effort').choices([...EFFORTS]))
     .action(
       async (
         agent: string,
         providerArgs: string[],
-        opts: { provider?: string; model?: string; branch?: string; base?: string; task?: string; taskFile?: string; prompt?: string | boolean; resume?: boolean; attach?: boolean; yes?: boolean; file?: string[] },
+        opts: { provider?: string; model?: string; branch?: string; base?: string; task?: string; taskFile?: string; prompt?: string | boolean; resume?: boolean; attach?: boolean; yes?: boolean; file?: string[]; account?: string; effort?: Effort },
       ) => {
         const { agents } = services();
         await agents.spawn(agent, {
@@ -248,6 +255,8 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
           yes: opts.yes,
           files: opts.file,
           args: providerArgs,
+          account: opts.account,
+          effort: opts.effort,
         });
       },
     );
@@ -270,8 +279,10 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .option('--no-prompt', 'start the agent CLI without an initial prompt')
     .option('-y, --yes', 'do not ask before interrupting a running agent')
     .option('-f, --file <path>', 'input file or folder for the agent (repeatable)', collect)
-    .action(async (agent: string, opts: { resume?: boolean; prompt?: string | boolean; yes?: boolean; file?: string[] }) => {
+    .addOption(new Option('--effort <level>', 'reasoning effort for the relaunch').choices([...EFFORTS]))
+    .action(async (agent: string, opts: { resume?: boolean; prompt?: string | boolean; yes?: boolean; file?: string[]; effort?: Effort }) => {
       await services().agents.restart(agent, {
+        effort: opts.effort,
         files: opts.file,
         resume: opts.resume,
         prompt: typeof opts.prompt === 'string' ? opts.prompt : undefined,
@@ -516,6 +527,11 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
         else d.ui.info(`${opts.dryRun ? 'Would: ' : 'Skipped: '}${a.message}`);
       }
     });
+
+  registerFeatureCommands(program, () => {
+    const { d, agents } = services();
+    return { d, agents };
+  }, context);
 
   // Only the root command accepts stray words (to report "Unknown command" itself);
   // set last so subcommands keep commander's strict argument checking.

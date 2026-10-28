@@ -321,4 +321,51 @@ describe.runIf(hasTmux())('features', () => {
     expect(f.tasks[0]?.route).toMatchObject({ account: 'codex-a', provider: 'codex' });
     expect(f.tasks[0]?.route.reason).toMatch(/switched by you from codex-b to codex-a/);
   });
+
+  it('drives the whole flow from the CLI', async () => {
+    await setup([{ id: 'only', validation: ['test -f only/a.txt'] }]);
+    const ui = () => captureUi();
+    let out = ui();
+    const aw = async (...args: string[]) => {
+      out = ui();
+      return runCli(['node', 'aw', ...args], { cwd: ctx.root, env: ctx.deps.env, ui: out, prompter: new ScriptedPrompter(true), dataDir: ctx.deps.dataDir, selfCommand: ['/bin/sh', '-c', 'exec sleep 300'] });
+    };
+    expect(await aw('feature', 'new', 'Make', 'one', 'file')).toBe(0);
+    expect(out.text()).toContain('# Tasks');
+    expect(out.text()).toContain('aw feature approve make-one-file');
+    expect(await aw('feature')).toBe(0);
+    expect(out.text()).toMatch(/make-one-file\s+plan ready: review/);
+    expect(await aw('feature', 'route', 'make', 'only', '--effort', 'xhigh')).toBe(0);
+    expect(out.text()).toContain('only: codex-a (codex), effort xhigh');
+    expect(await aw('feature', 'route', 'make', 'only', '--effort', 'huge')).toBe(2);
+    expect(await aw('feature', 'approve', 'make')).toBe(0);
+    expect(await aw('feature', 'watch', '--once')).toBe(0);
+    await waitFor(() => log().includes('agent=make-one-file-only'));
+    expect(log()).toContain('model_reasoning_effort="xhigh"');
+    expect(await aw('status')).toBe(0);
+    expect(out.text()).toContain('make-one-file-only');
+
+    work('make-one-file-only', 'only/a.txt', 'a');
+    report('make-one-file-only', 'done');
+    expect(await aw('feature', 'watch', '--once')).toBe(0);
+    expect(await aw('feature', 'show', 'make-one-file')).toBe(0);
+    expect(out.text()).toContain('ready for PR');
+    expect(out.text()).toMatch(/✓ only/);
+
+    expect(await aw('accounts')).toBe(0);
+    expect(out.text()).toMatch(/codex-a\s+codex\s+available/);
+    expect(await aw('accounts', 'limited', 'codex-a', '--until', '2h', '--note', 'weekly cap')).toBe(0);
+    expect(await aw('accounts')).toBe(0);
+    expect(out.text()).toMatch(/codex-a\s+codex\s+limited until .*weekly cap/);
+    expect(await aw('accounts', 'available', 'codex-a')).toBe(0);
+    expect(await aw('accounts', 'add', 'claude-work', '--provider', 'claude', '--tag', 'work')).toBe(0);
+    expect(await aw('accounts', '--json')).toBe(0);
+    expect(JSON.parse(out.out.join('\n')).map((a: { name: string }) => a.name)).toContain('claude-work');
+    expect(await aw('accounts', 'stats')).toBe(0);
+    expect(out.text()).toContain('low complexity · codex · effort xhigh');
+    expect(await aw('switch', 'make-one-file-only', 'codex-b', '-y')).toBe(0);
+    expect(out.text()).toContain('now runs on codex-b');
+    expect(await aw('feature', 'cleanup', 'make-one-file')).toBe(0);
+    expect(out.text()).toMatch(/Removed: .*integration worktree/);
+  });
 });
