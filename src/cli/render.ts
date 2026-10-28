@@ -4,6 +4,7 @@ import type { CheckReport } from '../core/safety/check.js';
 import type { DoctorCheck } from '../core/workspace/doctor.js';
 import type { PrStatusRow } from '../core/github/pr-service.js';
 import type { FileEntry, SharedListing } from '../core/files/shared.js';
+import type { ProjectRecord } from '../core/projects/registry.js';
 import path from 'node:path';
 import { displayPath } from '../infrastructure/filesystem/fs.js';
 import { colors as c, padVisible, symbols, table } from '../infrastructure/terminal/ui.js';
@@ -143,4 +144,11 @@ export function renderFiles(listing: SharedListing): string {
   for (const agent of agents) block(`Outbox: ${agent}`, listing.outbox[agent] ?? [], path.join(listing.root, 'outbox', agent));
   out.push(c.dim('Add inputs: aw files add <file...> [--agent <name>] [--tell]   ·   Path: aw files path'));
   return out.join('\n');
+}
+
+export function renderProjects(list: ProjectRecord[]): string {
+  return table(
+    ['NAME', 'PATH', 'LAST OPENED', 'ID'],
+    list.map((p) => [p.name, displayPath(p.path), new Date(p.lastOpenedAt).toLocaleString(), c.dim(p.id)]),
+  );
 }

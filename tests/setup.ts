@@ -22,3 +22,5 @@ process.env.GIT_TERMINAL_PROMPT = '0';
 process.env.NO_COLOR = '1';
 delete process.env.TMUX;
 delete process.env.AW_WORKSPACE_DIR;
+// Never touch the user's real data directory (global project registry, ...).
+process.env.AW_DATA_DIR = path.join(home, 'aw-data');

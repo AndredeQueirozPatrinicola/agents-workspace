@@ -14,7 +14,7 @@ import { validateAgentName } from '../core/config/loader.js';
 import { displayPath } from '../infrastructure/filesystem/fs.js';
 import { logger } from '../infrastructure/logger.js';
 import { packageVersion } from '../infrastructure/filesystem/package-root.js';
-import { renderCheck, renderDoctor, renderFiles, renderPrStatus, renderStatus } from './render.js';
+import { renderCheck, renderDoctor, renderFiles, renderPrStatus, renderProjects, renderStatus } from './render.js';
 
 /**
  * Command-line interface. Each action is a thin adapter: parse options,
@@ -85,6 +85,47 @@ Typical workflow:
 Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety check, 130 aborted.`,
     );
 
+  // ----------------------------------------------------------- projects
+  const projects = program
+    .command('projects')
+    .description('global registry of the repositories Agent Workspace knows on this machine');
+  projects
+    .command('list', { isDefault: true })
+    .description('list registered projects')
+    .option('--json', 'output machine-readable JSON')
+    .action(async (opts: { json?: boolean }) => {
+      const { d } = services();
+      const list = await d.projects.list();
+      if (opts.json) {
+        d.ui.line(JSON.stringify(list, null, 2));
+        return;
+      }
+      if (!list.length) {
+        d.ui.line('No projects registered yet.');
+        d.ui.hint('Register one with: aw projects add <path>   (or run any aw command inside an initialized repository)');
+        return;
+      }
+      d.ui.line(renderProjects(list));
+    });
+  projects
+    .command('add [path]')
+    .description('register a Git repository (referenced in place, never copied)')
+    .action(async (target: string | undefined) => {
+      const { d } = services();
+      const { project, created } = await d.projects.register(path.resolve(d.cwd, target ?? '.'));
+      d.ui.ok(`${created ? 'Registered' : 'Already registered'}: ${project.name} (${displayPath(project.path)})`);
+    });
+  projects
+    .command('remove <project>')
+    .description('forget a project (by id, name or path); the repository is not touched')
+    .action(async (ref: string) => {
+      const { d } = services();
+      const project = await d.projects.get(ref);
+      if (!project) throw new AwError(`No registered project matches "${ref}".`, { exitCode: ExitCode.USAGE, hint: 'List them with: aw projects' });
+      await d.projects.remove(project.id);
+      d.ui.ok(`Forgot ${project.name}. Nothing in ${displayPath(project.path)} was changed.`);
+    });
+
   // ------------------------------------------------------------- doctor
   program
     .command('doctor')
@@ -109,6 +150,7 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .action(async (opts: { name?: string; base?: string; provider?: string; remote?: string }) => {
       const { d } = services();
       const result = await initWorkspace(d, opts);
+      await d.projects.register(result.configRoot).catch(() => undefined);
       d.ui.header('Agent Workspace');
       d.ui.kv('Project', result.projectName);
       d.ui.kv('Base', result.baseBranch);

@@ -106,8 +106,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export class AgentService {
   constructor(private readonly deps: Deps) {}
 
-  open(): Promise<Workspace> {
-    return openWorkspace(this.deps.git, this.deps.cwd, this.deps.providers.ids(), this.deps.env);
+  async open(): Promise<Workspace> {
+    const ws = await openWorkspace(this.deps.git, this.deps.cwd, this.deps.providers.ids(), this.deps.env);
+    await this.rememberProject(ws);
+    return ws;
+  }
+
+  /** Register initialized repositories in the global project registry (read-only when already known). */
+  private async rememberProject(ws: Workspace): Promise<void> {
+    try {
+      if (!(await this.deps.projects.findContaining(ws.configRoot))) await this.deps.projects.register(ws.configRoot);
+    } catch {
+      /* the registry is a convenience; never fail a command because of it */
+    }
   }
 
   repoCwd(ws: Workspace): string {
