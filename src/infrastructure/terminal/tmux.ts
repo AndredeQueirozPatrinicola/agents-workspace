@@ -200,6 +200,8 @@ export class TmuxBackend implements TerminalBackend {
       const [window, pane] = out.trim().split(' ');
       if (!window || !pane) throw new AwError('Unexpected tmux output while creating the dashboard.');
       windows.push(window);
+      // Set immediately so a quickly exiting command leaves a visible (dead) pane instead of a vanished window.
+      await this.run(['set-window-option', '-t', window, 'remain-on-exit', 'on']);
       return { window, pane };
     };
 

@@ -45,6 +45,8 @@ async function aw(args: string[], options: { cwd?: string; prompter?: Prompter; 
     env: options.env ?? env,
     ui: ctx.ui,
     prompter: options.prompter ?? new ScriptedPrompter(false),
+    // The dashboard's status window re-invokes the CLI; inside vitest there is no CLI entry point.
+    selfCommand: ['/bin/sh', '-c', 'exec sleep 300'],
   });
 }
 
