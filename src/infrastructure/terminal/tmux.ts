@@ -121,11 +121,29 @@ export class TmuxBackend implements TerminalBackend {
     await this.exec(['kill-session', '-t', `=${name}`], `Stopping tmux session ${name}`);
   }
 
-  async sendKeys(name: string, keys: string[]): Promise<void> {
-    // Target the session's first pane (where the agent runs), even if the user split the window.
+  /** The session's first pane (where the agent runs), even if the user split the window. */
+  private async agentPane(name: string): Promise<string> {
     const panes = await this.run(['list-panes', '-s', '-t', `=${name}`, '-F', '#{pane_id}']);
     const pane = panes.exitCode === 0 ? panes.stdout.split('\n')[0]?.trim() : '';
-    await this.exec(['send-keys', '-t', pane || `=${name}:`, ...keys], `Sending keys to ${name}`);
+    return pane || `=${name}:`;
+  }
+
+  async sendKeys(name: string, keys: string[]): Promise<void> {
+    await this.exec(['send-keys', '-t', await this.agentPane(name), ...keys], `Sending keys to ${name}`);
+  }
+
+  async sendText(name: string, text: string): Promise<void> {
+    const pane = await this.agentPane(name);
+    // -l: literal text (no key-name interpretation); Enter is sent separately
+    // after a short pause so TUIs register the text before submitting.
+    await this.exec(['send-keys', '-t', pane, '-l', text], `Sending text to ${name}`);
+    await new Promise((r) => setTimeout(r, 150));
+    await this.exec(['send-keys', '-t', pane, 'Enter'], `Sending Enter to ${name}`);
+  }
+
+  async respawn(name: string, cwd: string, command: string[]): Promise<void> {
+    if (command.length < 2) throw new Error('respawn requires the command as at least two argv elements.');
+    await this.exec(['respawn-pane', '-k', '-t', await this.agentPane(name), '-c', cwd, ...command], `Relaunching ${name}`);
   }
 
   async paneState(name: string): Promise<PaneState | null> {
@@ -202,17 +220,24 @@ export class TmuxBackend implements TerminalBackend {
     if (options.statusCommand && options.statusCommand.length >= 2) {
       await newWindow('status', options.statusCommand);
     }
+    if (options.shellCommand && options.shellCommand.length >= 2) {
+      await newWindow('shell', options.shellCommand);
+    }
     if (!created) throw new AwError('No panes to show in the dashboard.');
 
     const session = `=${options.name}:`;
     // Dashboard-only session options: they do not affect agent sessions or the
     // user's other sessions. The dashboard uses a different prefix than the
     // agent sessions so that the normal prefix reaches the focused agent.
+    const prefix = await this.dashboardPrefix();
     const sessionOptions: Array<[string, string]> = [
-      ['prefix', await this.dashboardPrefix()],
+      ['prefix', prefix],
       ['mouse', 'on'],
       ['status-left', ' aw dashboard '],
       ['status-left-length', '20'],
+      // Always-visible key reminder (dashboard session only).
+      ['status-right', ` ${prefix} n/p/0-9: windows | ${prefix} arrows: panes | ${prefix} z: zoom | ${prefix} w: list | ${prefix} d: detach `],
+      ['status-right-length', '120'],
     ];
     for (const [key, value] of sessionOptions) await this.run(['set-option', '-t', session, key, value]);
     for (const window of windows) {

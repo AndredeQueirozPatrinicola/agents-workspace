@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
@@ -95,6 +96,30 @@ describe.runIf(hasTmux())('aw end-to-end', () => {
     expect(git(ctx.root, 'status', '--porcelain')).toBe('?? .agents/\n');
     expect(await aw(['init'])).toBe(2);
     expect(ctx.ui.text()).toMatch(/Already initialized/);
+  });
+
+  it('explains that a brand-new repository needs a first commit before spawning', async () => {
+    const parent = tempDir();
+    const root = path.join(parent, 'fresh');
+    mkdirSync(root);
+    git(root, 'init', '-q', '-b', 'master');
+    ctx = { ...ctx, root, parent };
+    expect(await aw(['init', '--provider', 'claude'])).toBe(0);
+    expect(ctx.ui.err.join('\n')).toMatch(/no commits yet/);
+    expect(ctx.ui.out.join('\n')).toMatch(/Next steps:\n {2}git add \.agents && git commit/);
+    expect(await aw(['spawn', 'database', '-t', 'Schema'])).toBe(2);
+    expect(ctx.ui.text()).toMatch(/no commits yet, so there is nothing to branch/);
+    expect(ctx.ui.text()).toMatch(/git add \.agents && git commit/);
+    expect(ctx.ui.text()).not.toMatch(/git fetch/);
+    // After the first commit, spawning works.
+    git(root, 'add', '.agents');
+    git(root, 'commit', '-q', '-m', 'Add Agent Workspace configuration');
+    const bin = tempDir('aw-bin-');
+    const claude = fakeAgentCli(bin, 'claude', '--model --continue');
+    const file = path.join(root, '.agents', 'workspace.yaml');
+    writeFileSync(file, readFileSync(file, 'utf8').replace('# Optional per-provider settings', `providers:\n  claude:\n    command: ${claude.path}\n\n# Optional per-provider settings`));
+    expect(await aw(['spawn', 'database'])).toBe(0);
+    expect(ctx.ui.text()).toContain('Worktree created (new branch agent/database from master)');
   });
 
   it('commands outside an initialized repo fail with actionable errors', async () => {
@@ -319,6 +344,76 @@ describe.runIf(hasTmux())('aw end-to-end', () => {
     expect(ctx.ui.text()).toMatch(/Agents are still running/);
     const status = await statusJson();
     expect(status.agents.map((a) => a.session)).toEqual(['running', 'running']);
+  });
+
+  it('restarts an exited agent in place, so attached clients and dashboard panes stay connected', async () => {
+    await initWithFakes();
+    expect(await aw(['spawn', 'a', '-t', 'Build A'])).toBe(0);
+    expect(await aw(['dashboard', '--no-attach'])).toBe(0);
+    const session = (await statusJson()).agents[0] as unknown as { sessionName: string };
+    const tmux = (...args: string[]) => execFileSync('tmux', ['-L', socket, ...args], { encoding: 'utf8' });
+    const dashboard = tmux('list-sessions', '-F', '#{session_name}').split('\n').find((n) => n.endsWith('--dashboard')) as string;
+    expect(tmux('list-windows', '-t', `=${dashboard}`, '-F', '#{window_name}').trim().split('\n')).toEqual(['agents', 'status', 'shell']);
+
+    // The agent CLI exits (e.g. Ctrl-C after a failed login).
+    expect(await aw(['tell', 'a', 'exit'])).toBe(0);
+    await waitFor(async () => (await statusJson()).agents[0]?.session === 'exited');
+    // Typing into an exited agent would run commands in its shell: refused.
+    expect(await aw(['tell', 'a', 'rm -rf something'])).toBe(4);
+
+    expect(await aw(['spawn', 'a'])).toBe(0);
+    expect(ctx.ui.text()).toMatch(/relaunched in its existing tmux session/);
+    await waitFor(async () => (await statusJson()).agents[0]?.session === 'running');
+    expect(((await statusJson()).agents[0] as unknown as { sessionName: string }).sessionName).toBe(session.sessionName);
+    expect(tmux('list-panes', '-t', `=${dashboard}:agents`, '-F', '#{pane_dead}').trim()).toBe('0');
+
+    expect(await aw(['tell', 'a', 'hello', 'agent'])).toBe(0);
+    await waitFor(() => readLog(ctx.codexLog).includes('got: hello agent'));
+
+    // restart interrupts a running agent (after confirmation) and relaunches in the same session.
+    const launchesBefore = readLog(ctx.codexLog).split('---').length;
+    expect(await aw(['restart', 'a'])).toBe(130); // declined
+    expect(await aw(['restart', 'a', '--yes', '--resume'])).toBe(0);
+    await waitFor(() => readLog(ctx.codexLog).split('---').length > launchesBefore);
+    expect(readLog(ctx.codexLog)).toContain('arg=resume');
+    expect(tmux('list-panes', '-t', `=${dashboard}:agents`, '-F', '#{pane_dead}').trim()).toBe('0');
+  });
+
+  it('syncs the base branch into an agent branch and hands conflicts to the agent', async () => {
+    await initWithFakes();
+    git(ctx.root, 'add', '.agents');
+    git(ctx.root, 'commit', '-q', '-m', 'config');
+    expect(await aw(['spawn', 'a', '-t', 'A'])).toBe(0);
+    expect(await aw(['sync', 'a', '--yes'])).toBe(0);
+    expect(ctx.ui.text()).toMatch(/already up to date/);
+
+    // Clean merge
+    commitFile(ctx.root, 'docs/contract.md', 'v1\n');
+    expect(await aw(['sync', 'a', '--yes'])).toBe(0);
+    expect(existsSync(path.join(wsPath('a'), 'docs', 'contract.md'))).toBe(true);
+
+    // Conflict: left in place, listed, and (with --ask-agent) handed to the agent
+    commitFile(wsPath('a'), 'src/app.ts', 'agent version\n');
+    commitFile(ctx.root, 'src/app.ts', 'main version\n');
+    writeFileSync(path.join(wsPath('a'), 'wip.txt'), 'x');
+    expect(await aw(['sync', 'a', '--yes'])).toBe(4);
+    expect(ctx.ui.text()).toMatch(/uncommitted changes; commit them before syncing/);
+    rmSync(path.join(wsPath('a'), 'wip.txt'));
+    expect(await aw(['sync', 'a', '--yes', '--ask-agent'])).toBe(0);
+    expect(ctx.ui.text()).toMatch(/conflicts in 1 file/);
+    expect(ctx.ui.text()).toContain('src/app.ts');
+    await waitFor(() => readLog(ctx.codexLog).includes('merge conflicts in: src/app.ts'));
+    expect(readFileSync(path.join(wsPath('a'), 'src', 'app.ts'), 'utf8')).toContain('<<<<<<<');
+    expect(await aw(['sync', 'a', '--yes'])).toBe(4);
+    expect(ctx.ui.text()).toMatch(/merge is already in progress/);
+  });
+
+  it('opens or prints the task file for editing', async () => {
+    await initWithFakes();
+    expect(await aw(['edit', 'ghost'])).toBe(2);
+    expect(await aw(['add', 'api'])).toBe(0);
+    expect(await aw(['edit', 'api'])).toBe(0); // no TTY in tests: prints the path
+    expect(ctx.ui.out.join('\n')).toContain(path.join(ctx.root, '.agents', 'tasks', 'api.md'));
   });
 
   it('prints help and version', async () => {

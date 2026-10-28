@@ -20,6 +20,8 @@ export interface InitResult {
   projectName: string;
   baseBranch: string;
   provider: string;
+  /** False when the repository has no commits yet (agents cannot branch off it). */
+  hasCommits: boolean;
 }
 
 export function sanitizeProjectName(raw: string): string {
@@ -82,5 +84,6 @@ export async function initWorkspace(deps: Deps, options: InitOptions = {}): Prom
   await write(path.join(CONFIG_DIR, 'README.md'), readTemplate('agents-readme.md'));
   await write(path.join(CONFIG_DIR, TASKS_DIR, '.gitkeep'), '');
 
-  return { configRoot: root, configPath, created, projectName, baseBranch, provider };
+  const hasCommits = await git.hasCommits(root);
+  return { configRoot: root, configPath, created, projectName, baseBranch, provider, hasCommits };
 }

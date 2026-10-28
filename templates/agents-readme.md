@@ -12,6 +12,9 @@ Common commands:
 aw status            # agents, branches, sessions, PRs
 aw spawn <agent>     # create worktree + branch and launch the agent in tmux
 aw attach <agent>    # attach to the agent's terminal
+aw restart <agent>   # relaunch an agent that quit (same session)
+aw tell <agent> "…"  # send a message to a running agent
+aw sync <agent>      # merge the base branch into the agent's branch
 aw dashboard         # tmux grid of all running agents
 aw check             # overlap / behind-base / conflict report
 aw pr <agent>        # push the branch and open a (draft) PR

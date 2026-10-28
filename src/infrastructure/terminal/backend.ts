@@ -27,6 +27,8 @@ export interface DashboardOptions {
   perWindow: number;
   /** Optional command for a status window (argv). */
   statusCommand?: string[];
+  /** Optional command for a free shell window (argv), e.g. to run git or aw commands. */
+  shellCommand?: string[];
 }
 
 export interface PaneState {
@@ -46,6 +48,10 @@ export interface TerminalBackend {
   createSession(options: CreateSessionOptions): Promise<void>;
   killSession(name: string): Promise<void>;
   sendKeys(name: string, keys: string[]): Promise<void>;
+  /** Type literal text into the session's agent pane and press Enter. */
+  sendText(name: string, text: string): Promise<void>;
+  /** Replace the process in the session's agent pane (same session, same pane). */
+  respawn(name: string, cwd: string, command: string[]): Promise<void>;
   paneState(name: string): Promise<PaneState | null>;
   /** Attach the current terminal (or switch the current client when already inside tmux). */
   attach(name: string): Promise<number>;

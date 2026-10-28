@@ -109,9 +109,12 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
       d.ui.line();
       for (const file of result.created) d.ui.ok(`Created ${file}`);
       d.ui.line();
+      if (!result.hasCommits) {
+        d.ui.warn('This repository has no commits yet. Agent worktrees branch off a commit, so commit before spawning.');
+      }
       d.ui.line('Next steps:');
-      d.ui.line('  aw spawn <agent> --provider codex|claude --task "What this agent should do"');
       d.ui.line('  git add .agents && git commit -m "Add Agent Workspace configuration"');
+      d.ui.line('  aw spawn <agent> --provider codex|claude --task "What this agent should do"');
     });
 
   // ---------------------------------------------------------------- add
@@ -183,6 +186,62 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
       context.exitCode = (await agents.attach(agent)) === 0 ? 0 : ExitCode.ERROR;
     });
 
+  // ------------------------------------------------------------ restart
+  program
+    .command('restart <agent>')
+    .description('relaunch an agent in its existing tmux session (dashboard panes stay connected); e.g. after a failed login or Ctrl-C')
+    .option('-r, --resume', "continue the provider's previous conversation instead of starting over with the task")
+    .option('--prompt <text>', 'additional instructions appended to the initial prompt')
+    .option('--no-prompt', 'start the agent CLI without an initial prompt')
+    .option('-y, --yes', 'do not ask before interrupting a running agent')
+    .action(async (agent: string, opts: { resume?: boolean; prompt?: string | boolean; yes?: boolean }) => {
+      await services().agents.restart(agent, {
+        resume: opts.resume,
+        prompt: typeof opts.prompt === 'string' ? opts.prompt : undefined,
+        noPrompt: opts.prompt === false,
+        yes: opts.yes,
+      });
+    });
+
+  // --------------------------------------------------------------- tell
+  program
+    .command('tell <agent> <message...>')
+    .description('type a message into a running agent (as if you typed it in its pane) and press Enter')
+    .action(async (agent: string, message: string[]) => {
+      await services().agents.tell(agent, message.join(' '));
+    });
+
+  // --------------------------------------------------------------- sync
+  program
+    .command('sync <agent>')
+    .description("merge the base branch into the agent's branch (git merge, never rebase); conflicts are left for you or the agent")
+    .option('--ask-agent', 'on conflicts, ask the (running) agent to resolve them, test and commit')
+    .option('--no-fetch', 'do not fetch the base branch from the remote first')
+    .option('-y, --yes', 'do not ask before merging while the agent is running')
+    .action(async (agent: string, opts: { askAgent?: boolean; fetch: boolean; yes?: boolean }) => {
+      const result = await services().agents.sync(agent, opts);
+      if (result.conflicts.length && !opts.askAgent) context.exitCode = ExitCode.UNSAFE;
+    });
+
+  // --------------------------------------------------------------- edit
+  program
+    .command('edit <agent>')
+    .description("open the agent's task file in $VISUAL / $EDITOR (creates it from the template if missing)")
+    .action(async (agent: string) => {
+      const { d, agents } = services();
+      const { path: file, created } = await agents.taskFileFor(agent);
+      if (created) d.ui.ok(`Created ${file} from the template`);
+      const editor = d.env.VISUAL || d.env.EDITOR || 'nano';
+      if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        d.ui.line(file);
+        return;
+      }
+      const [cmd, ...args] = editor.split(/\s+/).filter(Boolean);
+      const code = await d.runner.runInteractive(cmd ?? 'nano', [...args, file]);
+      if (code !== 0) context.exitCode = ExitCode.ERROR;
+      else d.ui.line(`Next: aw spawn ${agent}   (or "aw restart ${agent}" if it is already running)`);
+    });
+
   // --------------------------------------------------------------- stop
   program
     .command('stop <agent>')
@@ -240,9 +299,10 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .description('open a tmux grid of all running agents (closing it never stops agents)')
     .option('--per-window <n>', 'agent panes per tmux window', positiveInt, 4)
     .option('--no-status', 'do not add the live status window')
+    .option('--no-shell', 'do not add the shell window (a terminal in the main repository)')
     .option('--no-attach', 'create the dashboard without attaching')
     .option('--kill', 'close the dashboard session (agents keep running)')
-    .action(async (opts: { perWindow: number; status: boolean; attach: boolean; kill?: boolean }) => {
+    .action(async (opts: { perWindow: number; status: boolean; shell: boolean; attach: boolean; kill?: boolean }) => {
       const { d, agents } = services();
       const result = await openDashboard(d, agents, opts);
       if (result.killed) d.ui.ok('Dashboard closed. Agents are still running.');

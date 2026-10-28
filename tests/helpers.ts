@@ -56,7 +56,10 @@ export function fakeAgentCli(dir: string, name: string, helpText: string): { pat
 if [ "$1" = "--version" ]; then echo "${name} 9.9.9"; exit 0; fi
 if [ "$1" = "--help" ]; then echo "${helpText}"; exit 0; fi
 { echo "cwd=$(pwd)"; echo "agent=$AW_AGENT"; for a in "$@"; do printf 'arg=%s\\n' "$a"; done; echo "---"; } >> "${log}"
-while read line; do echo "got: $line"; done
+while read line; do
+  echo "got: $line"; echo "got: $line" >> "${log}"
+  if [ "$line" = "exit" ]; then exit 3; fi
+done
 `,
   );
   chmodSync(file, 0o755);

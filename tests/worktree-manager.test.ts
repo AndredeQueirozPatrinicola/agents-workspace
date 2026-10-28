@@ -104,7 +104,7 @@ describe('WorktreeManager.ensure', () => {
   it('rejects invalid branch names and missing base branches', async () => {
     const { manager, input } = setup();
     await expect(manager.ensure(input('x', { branch: 'bad..branch' }))).rejects.toThrow(/not a valid Git branch name/);
-    await expect(manager.ensure(input('y', { base: 'nope' }))).rejects.toThrow(/Base branch "nope" was not found/);
+    await expect(manager.ensure(input('y', { base: 'nope' }))).rejects.toThrow(/Base branch "nope" was not found locally\./);
   });
 
   it('distinguishes managed and user-created worktrees', async () => {

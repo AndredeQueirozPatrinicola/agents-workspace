@@ -14,6 +14,7 @@ import { dashboardSessionName, sessionNameFor } from '../workspace/workspace.js'
 export interface DashboardOptions {
   perWindow?: number | undefined;
   status?: boolean | undefined;
+  shell?: boolean | undefined;
   attach?: boolean | undefined;
   kill?: boolean | undefined;
 }
@@ -54,12 +55,15 @@ export async function openDashboard(deps: Deps, service: AgentService, options: 
   const statusCommand = options.status === false
     ? undefined
     : ['env', ...(socket ? [`AW_TMUX_SOCKET=${socket}`] : []), ...deps.selfCommand, 'status', '--watch', '3'];
+  // A free shell in the main repository, for git / aw / any other command.
+  const shellCommand = options.shell === false ? undefined : ['/bin/sh', '-c', 'exec "${SHELL:-/bin/sh}" -l'];
   await terminal.createDashboard({
     name,
     cwd: ws.configRoot,
     panes,
     perWindow: options.perWindow ?? 4,
     ...(statusCommand ? { statusCommand } : {}),
+    ...(shellCommand ? { shellCommand } : {}),
   });
 
   let attached = false;

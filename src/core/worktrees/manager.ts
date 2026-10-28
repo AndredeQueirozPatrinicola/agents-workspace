@@ -207,9 +207,18 @@ export class WorktreeManager {
     if (await this.git.branchExists(this.repoCwd, base)) return base;
     if (await this.git.remoteBranchExists(this.repoCwd, remote, base)) return `${remote}/${base}`;
     if (await this.git.revParse(this.repoCwd, base)) return base; // tag or commit
-    throw new AwError(`Base branch "${base}" was not found locally or on "${remote}".`, {
+    if (!(await this.git.hasCommits(this.repoCwd))) {
+      throw new AwError('The repository has no commits yet, so there is nothing to branch agent worktrees from.', {
+        exitCode: ExitCode.USAGE,
+        hint: 'Create an initial commit first, e.g.: git add .agents && git commit -m "Add Agent Workspace configuration"',
+      });
+    }
+    const hasRemote = await this.git.remoteExists(this.repoCwd, remote);
+    throw new AwError(`Base branch "${base}" was not found locally${hasRemote ? ` or on "${remote}"` : ''}.`, {
       exitCode: ExitCode.USAGE,
-      hint: `Create it, run "git fetch ${remote}", or set project.baseBranch in .agents/workspace.yaml.`,
+      hint: hasRemote
+        ? `Create it, run "git fetch ${remote}", or set project.baseBranch in .agents/workspace.yaml.`
+        : `Create it (e.g. "git branch ${base}") or set project.baseBranch in .agents/workspace.yaml to an existing branch.`,
     });
   }
 

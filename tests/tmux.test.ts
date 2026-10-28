@@ -20,6 +20,18 @@ describe('tmux command construction', () => {
     ]);
   });
 
+  it('types literal text and relaunches the agent pane in place', async () => {
+    const runner = new MockRunner((_c, args) => (args.includes('list-panes') ? { stdout: '%7\n%8\n' } : {}));
+    const tmux = new TmuxBackend(runner, { env: {} });
+    await tmux.sendText('aw-p-1-api', 'fix the tests; $(not a command)');
+    await tmux.respawn('aw-p-1-api', '/ws/api', ['/bin/sh', '/state/launch.sh']);
+    expect(runner.calls.map((c) => c.args).filter((a) => !a.includes('list-panes'))).toEqual([
+      ['send-keys', '-t', '%7', '-l', 'fix the tests; $(not a command)'],
+      ['send-keys', '-t', '%7', 'Enter'],
+      ['respawn-pane', '-k', '-t', '%7', '-c', '/ws/api', '/bin/sh', '/state/launch.sh'],
+    ]);
+  });
+
   it('attaches outside tmux and switches clients inside tmux', () => {
     expect(new TmuxBackend(new MockRunner(), { env: {} }).attachArgs('s')).toEqual(['attach-session', '-t', '=s']);
     expect(new TmuxBackend(new MockRunner(), { env: { TMUX: '/tmp/tmux-1/default,1,0' } }).attachArgs('s')).toEqual([

@@ -19,6 +19,8 @@ aw pr backend       # push + draft PR, after confirmation
 
 No cloud service, no daemon, no database, no custom IDE. `aw` orchestrates tools you already use: `git`, `tmux`, `gh`, `codex`, `claude`.
 
+**New here? Read [`docs/daily-workflow.md`](docs/daily-workflow.md)**: the daily loop, dashboard keys, recovering an agent that quit, writing good task files, and handling conflicts.
+
 ---
 
 ## Contents
@@ -206,9 +208,13 @@ Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbo
 | `aw add <agent> [-p] [-b] [-m] [-t text] [-d] [--scope globs] [--depends-on agents]` | Adds an agent to the config and creates its task file, without starting it. |
 | `aw spawn <agent> [options] [-- provider args]` | Creates/reuses the worktree + branch and starts the agent in tmux. Idempotent: if it is already running, prints how to attach. |
 | `aw attach <agent>` | Attaches your terminal to the agent's session (switches client when already inside tmux). |
+| `aw restart <agent> [-r] [--prompt] [--no-prompt] [-y]` | Relaunches the agent **in its existing tmux session** (dashboard panes and attached terminals stay connected). Use it after a failed login, an accidental Ctrl-C or a crash; asks before interrupting a running agent. `-r` continues the previous conversation. |
+| `aw tell <agent> <message...>` | Types a message into a running agent and presses Enter. Refused if the agent has exited (its pane is then a shell). |
+| `aw sync <agent> [--ask-agent] [--no-fetch] [-y]` | `git merge` of the base branch into the agent's branch, inside its worktree (never rebase). Refuses with uncommitted changes; on conflicts the merge is left paused and listed, and `--ask-agent` hands it to the agent to resolve, test and commit. Exit 4 on unresolved conflicts. |
+| `aw edit <agent>` | Opens the agent's task file in `$VISUAL`/`$EDITOR` (creates it from the template if missing). |
 | `aw stop <agent> [-y]` | Interrupts the agent (Ctrl-C) and closes its session. Worktree, branch and commits are kept. Asks first if the agent is still running. |
 | `aw status [--json] [-w [secs]]` | Agents, providers, session state, branches, ahead/behind, uncommitted changes, task, worktree path, dependencies, cached PR. |
-| `aw dashboard [--per-window n] [--no-status] [--no-attach] [--kill]` | tmux grid of all running agents plus a live status window. |
+| `aw dashboard [--per-window n] [--no-status] [--no-shell] [--no-attach] [--kill]` | tmux grid of all running agents, plus a live `status` window and a `shell` window in the main repository. |
 | `aw check [--fetch] [--json] [--strict]` | Read-only safety report: shared branches, overlapping scopes, files changed outside scope, branches behind base, simulated merge conflicts with base and between agents, unmet dependencies. `--strict` exits 4 on errors (useful in scripts/CI). |
 | `aw pr <agent> [--draft\|--no-draft] [--title] [--body-file] [-y] [--allow-sensitive]` | Verifies auth/remote/commits, scans for secrets, asks before pushing, avoids duplicate PRs, creates the PR, prints the URL. |
 | `aw pr status [--json]` | PR number, state, checks summary and review decision for every agent branch. |
@@ -363,9 +369,9 @@ Notes:
 
 - One detached session per agent: `aw-<project>-<clone-id>-<agent>`. The clone id (hash of the Git common dir) keeps two clones of the same project from colliding, and the `aw-` prefix keeps clear of your own sessions. Targets always use tmux's exact-match form (`=name`), so `aw` never acts on a similarly named session.
 - Sessions survive terminal disconnects and closing your terminal (and SSH drops). Reattach with `aw attach <agent>`.
-- When the agent CLI exits, the session stays open with a shell in the worktree and the exit code is shown in `aw status` (`◐ exited (1)`). `aw stop` + `aw spawn` restarts it.
-- `aw dashboard` creates a separate session `aw-<project>-<clone-id>--dashboard`: up to 4 agents per window in a tiled layout (`--per-window`), pane titles showing agent/provider/branch, plus a `status` window running `aw status --watch`. Each pane is a nested tmux client attached to the agent session, so typing in a pane talks to that agent.
-  - The dashboard uses **Ctrl-a** as its prefix (Ctrl-b if your own prefix is already Ctrl-a), so your normal prefix still reaches the focused agent. Mouse mode is on in the dashboard: click to focus a pane. `Ctrl-a n/p` switches windows, `Ctrl-a d` detaches.
+- When the agent CLI exits, the session stays open with a shell in the worktree and the exit code is shown in `aw status` (`◐ exited (1)`). `aw restart <agent>` (or `aw spawn <agent>`) relaunches it in the same session, so dashboard panes keep working. Press **Esc**, not Ctrl-C, to interrupt an agent without quitting it.
+- `aw dashboard` creates a separate session `aw-<project>-<clone-id>--dashboard`: up to 4 agents per window in a tiled layout (`--per-window`), pane titles showing agent/provider/branch, plus a `status` window running `aw status --watch` and a `shell` window (a normal shell in the main repository for `git`, `aw tell`, `aw sync`, tests…). Each pane is a nested tmux client attached to the agent session, so typing in a pane talks to that agent.
+  - The dashboard uses **Ctrl-a** as its prefix (Ctrl-b if your own prefix is already Ctrl-a), so your normal prefix still reaches the focused agent. Mouse mode is on: click to focus a pane. `Ctrl-a n/p/0-9` switches windows, `Ctrl-a w` lists them, `Ctrl-a z` zooms a pane, `Ctrl-a d` detaches. The status bar shows these keys.
   - Closing or killing the dashboard (`aw dashboard --kill`) only ends the viewer clients. **Agents keep running.**
   - Small terminals: use `--per-window 2` (or 1) for larger panes; the tiled layout adapts on resize.
 - Set `AW_TMUX_SOCKET=aw` to run all agent sessions on a dedicated tmux server, fully isolated from your personal tmux.
@@ -473,10 +479,11 @@ Design choices, the state model and the risk analysis are in [`docs/architecture
 |---------|-----|
 | `Command not found: tmux` / exit 3 | Install tmux (`apt install tmux` / `brew install tmux`), run `aw doctor`. |
 | `Codex CLI not found ("codex")` | Install it, or set `providers.codex.command` to its path. |
-| Agent shows `◐ exited (1)` | `aw attach <agent>` to read the error (often: not logged in). Log in, then `aw stop <agent> && aw spawn <agent>`. |
+| Agent shows `◐ exited (1)` / pressed Ctrl-C by mistake | `aw attach <agent>` to read the error (often: not logged in; run `claude` → `/login` or `codex login` in a normal terminal once). Then `aw restart <agent>` (add `--resume` to continue the conversation). The dashboard pane reconnects automatically. |
 | `Agent "x" is busy` | Another `aw` command is running for that agent. If none is, `aw repair`. |
 | `Branch ... is already checked out at ...` | That branch is used by another worktree. Use `--branch`, or switch/remove the other worktree. |
 | `refusing to clean up` | The worktree has uncommitted/untracked files. Commit, stash or delete them yourself. |
+| `The repository has no commits yet` (fresh `git init`) | Worktrees branch off a commit: `git add .agents && git commit -m "Add Agent Workspace configuration"`, then spawn again. |
 | `This repository has not been initialized` | `aw init` in the repository root (or `git pull` the `.agents/` directory). |
 | Worktree directory deleted manually | `aw repair` (removes that agent worktree's Git metadata after confirmation, forgets the agent; the branch stays). |
 | `ignored files that would be deleted` on cleanup | Move what you need (e.g. `.env`) out of the worktree, or `aw cleanup <agent> --discard-ignored`. |

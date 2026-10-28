@@ -62,6 +62,8 @@ export interface SpawnOptions extends AddAgentOptions {
   args?: string[] | undefined;
   /** Answer yes to confirmations (adopting an unmarked worktree). */
   yes?: boolean | undefined;
+  /** Internal (used by restart): relaunch even if the agent is still running. */
+  restartRunning?: boolean | undefined;
 }
 
 export interface SpawnResult {
@@ -224,18 +226,29 @@ export class AgentService {
     return this.withAgentLock(ws, name, 'spawn', async () => {
       const sessionName = sessionNameFor(ws, name);
       const existing = await ws.state.getAgent(name);
+      // An existing session whose agent has exited (or that `aw restart` asked
+      // for) is relaunched in place: same tmux session, so `aw attach` clients
+      // and dashboard panes stay connected.
+      let relaunchInPlace = false;
       if (await terminal.hasSession(sessionName)) {
-        ui.info(`Agent "${name}" is already running (tmux session ${sessionName}).`);
-        ui.line();
-        ui.line('Attach:');
-        ui.line(`  aw attach ${name}`);
-        return {
-          agent: name,
-          sessionName,
-          worktreePath: existing?.worktreePath ?? worktreePathFor(ws, name),
-          alreadyRunning: true,
-          promptSent: false,
-        };
+        const current = await getSessionState(terminal, sessionName, launchFilesFor(ws.state.agentDir(name)).exitFile);
+        if (current === 'running' && !options.restartRunning) {
+          ui.info(`Agent "${name}" is already running (tmux session ${sessionName}).`);
+          ui.line();
+          ui.line('Attach:');
+          ui.line(`  aw attach ${name}`);
+          ui.line();
+          ui.line('Restart it (e.g. after a failed login):');
+          ui.line(`  aw restart ${name}`);
+          return {
+            agent: name,
+            sessionName,
+            worktreePath: existing?.worktreePath ?? worktreePathFor(ws, name),
+            alreadyRunning: true,
+            promptSent: false,
+          };
+        }
+        relaunchInPlace = true;
       }
       if (existing && existing.branch !== agent.branch && (await pathExists(existing.worktreePath))) {
         throw new AwError(
@@ -335,14 +348,19 @@ export class AgentService {
         command: providerConfig.command,
       });
       await writeLaunchFiles(files, launch, { agent: name, providerName: provider.displayName }, prompt);
-      await terminal.createSession({
-        name: sessionName,
-        cwd: wt.path,
-        command: ['/bin/sh', files.script],
-        windowName: name,
-        tags: { aw_agent: name, aw_project: ws.projectName, aw_runtime: ws.runtimeId },
-      });
-      ui.ok(`tmux session created (${sessionName})`);
+      if (relaunchInPlace) {
+        await terminal.respawn(sessionName, wt.path, ['/bin/sh', files.script]);
+        ui.ok(`Agent relaunched in its existing tmux session (${sessionName}); attached terminals and dashboard panes stay connected`);
+      } else {
+        await terminal.createSession({
+          name: sessionName,
+          cwd: wt.path,
+          command: ['/bin/sh', files.script],
+          windowName: name,
+          tags: { aw_agent: name, aw_project: ws.projectName, aw_runtime: ws.runtimeId },
+        });
+        ui.ok(`tmux session created (${sessionName})`);
+      }
 
       await ws.state.patchAgent(name, {
         session: { backend: 'tmux', name: sessionName, startedAt: new Date().toISOString() },
@@ -403,6 +421,162 @@ export class AgentService {
       result.push({ name: dep, state: depState });
     }
     return result;
+  }
+
+  // ------------------------------------------------------------ restart
+
+  /**
+   * Restart an agent in place. A running agent is interrupted first (after
+   * confirmation); the tmux session is reused so dashboard panes survive.
+   */
+  async restart(name: string, options: SpawnOptions = {}): Promise<SpawnResult> {
+    validateAgentName(name);
+    const ws = await this.open();
+    const record = await ws.state.getAgent(name);
+    const sessionName = record?.session?.name ?? sessionNameFor(ws, name);
+    const files = launchFilesFor(ws.state.agentDir(name));
+    if ((await this.deps.terminal.hasSession(sessionName)) && (await getSessionState(this.deps.terminal, sessionName, files.exitFile)) === 'running') {
+      await confirmOrAbort(this.deps.prompter, `Agent "${name}" is running. Interrupt and restart it? (worktree, branch and commits are kept)`, {
+        assumeYes: options.yes,
+      });
+      await this.withAgentLock(ws, name, 'restart', () => this.interrupt(sessionName, files.exitFile));
+    }
+    return this.spawn(name, { ...options, restartRunning: true });
+  }
+
+  // --------------------------------------------------------------- tell
+
+  /**
+   * Type a message into a running agent's TUI and press Enter. Refused when
+   * the agent has exited, because the pane then holds a shell and the text
+   * would be executed as a command.
+   */
+  async tell(name: string, message: string): Promise<void> {
+    validateAgentName(name);
+    const text = message.replace(/\s*\r?\n\s*/g, ' ').trim();
+    if (!text) throw new AwError('Nothing to send: the message is empty.', { exitCode: ExitCode.USAGE });
+    const ws = await this.open();
+    const record = await ws.state.getAgent(name);
+    const sessionName = record?.session?.name ?? sessionNameFor(ws, name);
+    const state = await getSessionState(this.deps.terminal, sessionName, launchFilesFor(ws.state.agentDir(name)).exitFile);
+    if (state !== 'running') {
+      throw new AwError(`Agent "${name}" is not running (${state}); refusing to type into its terminal.`, {
+        exitCode: ExitCode.UNSAFE,
+        hint: `Start it first: aw restart ${name} --resume`,
+      });
+    }
+    await this.deps.terminal.sendText(sessionName, text);
+    this.deps.ui.ok(`Sent to "${name}": ${text.length > 100 ? `${text.slice(0, 99)}…` : text}`);
+  }
+
+  // --------------------------------------------------------------- sync
+
+  /**
+   * Bring the base branch into an agent's branch with a normal `git merge`
+   * inside its worktree (never rebase, never force). Conflicts are left in
+   * place for a human or the agent to resolve; nothing is auto-resolved.
+   */
+  async sync(
+    name: string,
+    options: { yes?: boolean | undefined; askAgent?: boolean | undefined; fetch?: boolean | undefined } = {},
+  ): Promise<{ merged: boolean; conflicts: string[]; upToDate: boolean }> {
+    validateAgentName(name);
+    const { ui, git, terminal } = this.deps;
+    const ws = await this.open();
+    const record = await ws.state.getAgent(name);
+    if (!record || !(await pathExists(record.worktreePath))) {
+      throw new AwError(`Agent "${name}" has no worktree.`, { exitCode: ExitCode.USAGE, hint: `Spawn it first: aw spawn ${name}` });
+    }
+    const wt = record.worktreePath;
+    const sessionName = record.session?.name ?? sessionNameFor(ws, name);
+    const agentState = await getSessionState(terminal, sessionName, launchFilesFor(ws.state.agentDir(name)).exitFile);
+    if (options.askAgent && agentState !== 'running') {
+      throw new AwError(`--ask-agent needs "${name}" to be running (it is ${agentState}).`, {
+        exitCode: ExitCode.USAGE,
+        hint: `Start it with "aw restart ${name} --resume", or sync without --ask-agent.`,
+      });
+    }
+
+    return this.withAgentLock(ws, name, 'sync', async () => {
+      const cwd = this.repoCwd(ws);
+      const remote = ws.config.project.remote;
+      if (options.fetch !== false && (await git.remoteExists(cwd, remote))) {
+        const fetched = await git.fetch(cwd, remote, [record.base]);
+        if (fetched.exitCode !== 0) ui.warn(`Could not fetch ${remote}/${record.base}; using the local copy.`);
+      }
+      if (await git.mergeInProgress(wt)) {
+        throw new AwError(`A merge is already in progress in ${displayPath(wt)}.`, {
+          exitCode: ExitCode.UNSAFE,
+          hint: `Finish it (resolve, "git add", "git commit") or abort it with "git -C ${wt} merge --abort".`,
+        });
+      }
+      const status = await git.status(wt);
+      if (status.dirty) {
+        throw new AwError(`"${name}" has uncommitted changes; commit them before syncing.`, {
+          exitCode: ExitCode.UNSAFE,
+          details: status.files.slice(0, 15),
+          hint: agentState === 'running' ? `Ask the agent: aw tell ${name} "Commit your current work with a clear message."` : undefined,
+        });
+      }
+      const base = await this.comparisonBase(ws, record.base);
+      if (!base) throw new AwError(`Base branch "${record.base}" not found.`, { exitCode: ExitCode.USAGE });
+      const counts = await git.aheadBehind(cwd, base, record.branch);
+      if (counts && counts.behind === 0) {
+        ui.ok(`${record.branch} is already up to date with ${base}.`);
+        return { merged: false, conflicts: [], upToDate: true };
+      }
+      if (agentState === 'running') {
+        await confirmOrAbort(
+          this.deps.prompter,
+          `Merge ${counts?.behind ?? 'new'} commit(s) from ${base} into ${record.branch} while "${name}" is running?`,
+          { assumeYes: options.yes, defaultYes: true },
+        );
+      }
+      const result = await git.merge(wt, base);
+      if (result.clean) {
+        ui.ok(`Merged ${base} into ${record.branch} (${counts?.behind ?? '?'} commit(s)).`);
+        if (agentState === 'running') {
+          ui.info(`Tip: aw tell ${name} "I merged ${base} into your branch; re-run the tests."`);
+        }
+        return { merged: true, conflicts: [], upToDate: false };
+      }
+      ui.warn(`Merging ${base} into ${record.branch} produced conflicts in ${result.conflicts.length} file(s):`);
+      for (const f of result.conflicts) ui.warn(`  ${f}`);
+      if (options.askAgent) {
+        await terminal.sendText(
+          sessionName,
+          `I merged ${base} into your branch ${record.branch} and it has merge conflicts in: ${result.conflicts.join(', ')}. ` +
+            'Resolve them keeping the intent of both sides (read both versions and the related code), run the validation/tests, then stage the files and commit the merge. Do not abort the merge and do not rebase.',
+        );
+        ui.ok(`Asked "${name}" to resolve the conflicts. Watch it with: aw attach ${name}`);
+      } else {
+        ui.line();
+        ui.line('The merge is paused with conflict markers in the worktree. Choose one:');
+        ui.line(`  aw tell ${name} "Resolve the merge conflicts, run the tests and commit the merge"   # let the agent do it`);
+        ui.line(`  cd ${displayPath(wt)}   # resolve yourself (editor / git mergetool), then: git add <files> && git commit`);
+        ui.line(`  git -C ${displayPath(wt)} merge --abort   # undo the merge`);
+      }
+      return { merged: false, conflicts: result.conflicts, upToDate: false };
+    });
+  }
+
+  // --------------------------------------------------------------- edit
+
+  /** Path of an agent's task file, creating it from the template if missing. */
+  async taskFileFor(name: string): Promise<{ path: string; created: boolean }> {
+    validateAgentName(name);
+    const ws = await this.open();
+    if (!ws.config.agents[name]) {
+      throw new AwError(`Agent "${name}" is not configured.`, {
+        exitCode: ExitCode.USAGE,
+        hint: `Add it first: aw add ${name} --provider codex|claude`,
+      });
+    }
+    const agent = resolveAgent(ws.config, name);
+    const file = resolveTaskPath(ws.configRoot, agent.task);
+    const title = agent.description ?? name.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    const created = await writeFileExclusive(file, renderTaskFile(readTemplate('task.md'), { agent: name, title }));
+    return { path: file, created };
   }
 
   // --------------------------------------------------------------- stop

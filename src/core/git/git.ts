@@ -146,6 +146,15 @@ export class Git {
     return result.exitCode === 0 ? result.stdout.trim() : null;
   }
 
+  /** False for a freshly initialized repository whose HEAD has no commit yet. */
+  async hasCommits(cwd: string): Promise<boolean> {
+    return (await this.revParse(cwd, 'HEAD')) !== null;
+  }
+
+  async remoteExists(cwd: string, remote: string): Promise<boolean> {
+    return (await this.remoteUrl(cwd, remote)) !== null;
+  }
+
   async currentBranch(cwd: string): Promise<string | null> {
     const result = await this.run(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
     return result.exitCode === 0 ? result.stdout.trim() : null;
@@ -274,6 +283,24 @@ export class Git {
       return { clean: false, conflicts: [...new Set(lines.slice(1))] };
     }
     return null;
+  }
+
+  /** True while a merge is in progress in the given worktree. */
+  async mergeInProgress(worktreePath: string): Promise<boolean> {
+    return (await this.run(worktreePath, ['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'])).exitCode === 0;
+  }
+
+  /**
+   * `git merge --no-edit <ref>` in a worktree. On conflicts the merge is left
+   * in progress (never auto-resolved, never aborted) and the files are listed.
+   */
+  async merge(worktreePath: string, ref: string): Promise<{ clean: boolean; conflicts: string[] }> {
+    const result = await this.run(worktreePath, ['merge', '--no-edit', '--no-ff', ref]);
+    if (result.exitCode === 0) return { clean: true, conflicts: [] };
+    const unmerged = await this.run(worktreePath, ['diff', '--name-only', '--diff-filter=U']);
+    const conflicts = unmerged.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    if (conflicts.length === 0) ensureSuccess(result, 'Merging');
+    return { clean: false, conflicts };
   }
 
   async remoteUrl(cwd: string, remote: string): Promise<string | null> {
