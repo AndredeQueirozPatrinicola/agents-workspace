@@ -668,6 +668,9 @@ export class FeatureService {
     if (result.clean) {
       await this.patchTask(store, f.id, task.id, { status: 'integrated', integratedAt: new Date().toISOString(), attention: null });
       this.log(store, f.id, 'success', `Integrated into ${f.branch}`, task.id);
+      await this.agents
+        .tell(task.agent, `Your work passed validation and was merged into ${f.branch}. This task is complete: do not make further changes unless asked.`)
+        .catch(() => undefined);
       return;
     }
     // Only the merge we just started is undone; the feature branch is unchanged.

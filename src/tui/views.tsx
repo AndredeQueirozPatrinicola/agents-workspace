@@ -1,6 +1,10 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { ActivityEntry, ProviderInfo, SettingsInfo } from '../core/workspace/controller.js';
+import type { AccountView, ActivityEntry, ProviderInfo, SettingsInfo } from '../core/workspace/controller.js';
+import type { Feature } from '../core/features/store.js';
+import type { RoutingStats } from '../core/features/service.js';
+import { type Attention, STATUS_LABEL, TASK_GLYPH, featureLine, progress, taskStatusText } from '../core/features/format.js';
+import { planWaves } from '../core/features/plan.js';
 import type { AgentView, ProjectSnapshot, ProjectSummary } from '../core/workspace/snapshot.js';
 import { HELP_SECTIONS, VIEW_LABELS, VIEWS, type Overlay, type ViewId } from './state.js';
 import {
@@ -23,12 +27,63 @@ interface Sized {
   height: number;
 }
 
-export function Sidebar({ view, focused, height }: { view: ViewId; focused: boolean; height: number }) {
+export const SIDEBAR_WIDTH = 26;
+
+export function Sidebar({
+  view,
+  focused,
+  height,
+  projects = [],
+  projectId = null,
+  features = [],
+  openFeature = null,
+}: {
+  view: ViewId;
+  focused: boolean;
+  height: number;
+  projects?: ProjectSummary[];
+  projectId?: string | null;
+  features?: Feature[];
+  openFeature?: string | null;
+}) {
+  const inner = SIDEBAR_WIDTH - 4;
+  const lines: Array<{ text: string; color?: string; bold?: boolean; inverse?: boolean; dim?: boolean }> = [];
+  for (const [i, v] of VIEWS.entries()) {
+    lines.push({ text: `${i + 1} ${VIEW_LABELS[v]}`, ...(v === view ? { color: 'cyan', bold: true, inverse: focused } : {}) });
+  }
+  // Project tree: projects, and under the selected one its features and their tasks.
+  const budget = height - 2 - lines.length - 1;
+  const tree: typeof lines = [];
+  for (const p of projects) {
+    const selected = p.project.id === projectId;
+    const badge = p.state === 'ready' ? (p.attention ? ' !' : '') : p.state === 'not-initialized' ? ' ·' : ' ✗';
+    tree.push({ text: truncate(`${selected ? '▾' : '▸'} ${p.project.name}${badge}`, inner), ...(selected ? { bold: true } : { dim: true }) });
+    if (!selected) continue;
+    const visible = features.filter((f) => f.status !== 'done' && f.status !== 'cancelled');
+    for (const f of visible) {
+      const pr = progress(f);
+      const mark = pr.attention ? '!' : f.status === 'running' ? '●' : f.status === 'review' ? '◆' : f.status === 'ready' || f.status === 'pr-open' ? '✓' : f.status === 'plan-failed' ? '✗' : '…';
+      const count = f.tasks.length && f.status === 'running' ? ` ${pr.done}/${pr.total}` : '';
+      tree.push({ text: truncate(` ${mark} ${f.id}${count}`, inner), ...(pr.attention || f.status === 'review' ? { color: 'yellow' } : {}), ...(f.id === openFeature ? { inverse: true } : {}) });
+      if (f.status === 'running' || f.id === openFeature) {
+        for (const t of f.tasks.filter((x) => x.status !== 'skipped')) {
+          tree.push({ text: truncate(`    ${TASK_GLYPH[t.status]} ${t.id}`, inner), ...(t.status === 'blocked' || t.status === 'attention' ? { color: 'yellow' } : { dim: true }) });
+        }
+      }
+    }
+    const manual = p.agents;
+    if (manual && !visible.length) tree.push({ text: truncate(`   ${manual} agent(s)`, inner), dim: true });
+  }
+  if (tree.length) {
+    lines.push({ text: ' ' });
+    lines.push(...tree.slice(0, Math.max(0, budget)));
+    if (tree.length > budget && budget > 0) lines.push({ text: '  …', dim: true });
+  }
   return (
-    <Box flexDirection="column" width={16} height={height} borderStyle="single" borderColor={focused ? 'cyan' : 'gray'} paddingX={1}>
-      {VIEWS.map((v, i) => (
-        <Text key={v} color={v === view ? 'cyan' : undefined} bold={v === view} inverse={v === view && focused}>
-          {`${i + 1} ${VIEW_LABELS[v]}`}
+    <Box flexDirection="column" width={SIDEBAR_WIDTH} flexShrink={0} height={height} borderStyle="single" borderColor={focused ? 'cyan' : 'gray'} paddingX={1} overflow="hidden">
+      {lines.map((l, i) => (
+        <Text key={i} color={l.color} bold={l.bold} inverse={l.inverse} dimColor={l.dim} wrap="truncate">
+          {l.text}
         </Text>
       ))}
     </Box>
@@ -91,8 +146,8 @@ export function AgentTable({ agents, cursor, width, height, selectable }: { agen
       />
     );
   }
-  const cols = { name: 14, provider: 8, state: 15, branch: Math.max(12, Math.min(28, width - 70)), ab: 9, changes: 14, pr: 10 };
-  const header = `${pad('AGENT', cols.name)} ${pad('PROVIDER', cols.provider)} ${pad('STATE', cols.state)} ${pad('BRANCH', cols.branch)} ${pad('VS BASE', cols.ab)} ${pad('CHANGES', cols.changes)} ${pad('PR', cols.pr)} ACTIVITY`;
+  const cols = { name: 18, group: 14, provider: 13, state: 15, branch: Math.max(12, Math.min(28, width - 105)), ab: 9, changes: 14, pr: 10 };
+  const header = `${pad('AGENT', cols.name)} ${pad('FEATURE', cols.group)} ${pad('ACCOUNT', cols.provider)} ${pad('STATE', cols.state)} ${pad('BRANCH', cols.branch)} ${pad('VS BASE', cols.ab)} ${pad('CHANGES', cols.changes)} ${pad('PR', cols.pr)} ACTIVITY`;
   const { start, items } = windowed(agents, cursor, Math.max(1, height - 1));
   return (
     <Box flexDirection="column">
@@ -105,7 +160,7 @@ export function AgentTable({ agents, cursor, width, height, selectable }: { agen
           <Box key={a.name}>
             <Text inverse={selected} wrap="truncate">
               {truncate(
-                `${pad(a.name, cols.name)} ${pad(a.provider, cols.provider)} ${pad(sessionText(a), cols.state)} ${pad(a.branch, cols.branch)} ${pad(aheadBehindText(a.ahead, a.behind), cols.ab)} ${pad(changesText(a.changes), cols.changes)} ${pad(prText(a.pr), cols.pr)} ${relativeTime(a.lastActivity)}`,
+                `${pad(a.name, cols.name)} ${pad(a.feature ? a.feature.id : 'manual', cols.group)} ${pad(a.profile === 'default' ? a.provider : a.profile, cols.provider)} ${pad(sessionText(a), cols.state)} ${pad(a.branch, cols.branch)} ${pad(aheadBehindText(a.ahead, a.behind), cols.ab)} ${pad(changesText(a.changes), cols.changes)} ${pad(prText(a.pr), cols.pr)} ${relativeTime(a.lastActivity)}`,
                 width,
               )}
             </Text>
@@ -121,7 +176,8 @@ export function AgentDetails({ agent, width }: { agent: AgentView; width: number
     ['Agent', agent.name],
     ['State', sessionText(agent), sessionColor(agent.session)],
     ['Provider', agent.provider],
-    ['Profile', `${agent.profile} (the CLI's own login; profiles arrive in M2)`],
+    ['Account', agent.profile === 'default' ? "default (the CLI's own login) · c switches" : `${agent.profile} · c switches`],
+    ['Feature', agent.feature ? `${agent.feature.title} (${agent.feature.id}/${agent.feature.task})` : 'manual agent'],
     ['Model', agent.model ?? 'provider default'],
     ['Effort', agent.effort ?? 'provider default'],
     ['Task', agent.task.title ?? agent.description ?? (agent.task.exists ? '(untitled)' : '(no task file)')],
@@ -168,7 +224,7 @@ export function AgentsView({ snapshot, cursor, width, height }: Sized & { snapsh
   );
 }
 
-export function OverviewView({ snapshot, cursor, width, height, projectCount }: Sized & { snapshot: ProjectSnapshot | null; cursor: number; projectCount: number }) {
+export function OverviewView({ snapshot, cursor, width, height, projectCount, needs = [] }: Sized & { snapshot: ProjectSnapshot | null; cursor: number; projectCount: number; needs?: Attention[] }) {
   if (!snapshot) {
     return projectCount ? <NoProject /> : (
       <Empty
@@ -184,12 +240,15 @@ export function OverviewView({ snapshot, cursor, width, height, projectCount }: 
   if (snapshot.state !== 'ready') return <ProjectProblem snapshot={snapshot} />;
   const agents = snapshot.agents;
   const count = (s: AgentView['session']) => agents.filter((a) => a.session === s).length;
-  const attention = agents.filter((a) => a.session === 'exited' || (a.changes?.conflicted ?? 0) > 0 || (a.behind ?? 0) > 0 || (a.spawned && !a.worktreeExists));
+  // Feature task agents fall behind their feature branch by design (other tasks get merged): not a problem.
+  const behind = (a: AgentView) => (a.feature ? 0 : (a.behind ?? 0));
+  const attention = agents.filter((a) => a.session === 'exited' || (a.changes?.conflicted ?? 0) > 0 || behind(a) > 0 || (a.spawned && !a.worktreeExists));
   const c = snapshot.config;
   // Line budget: sections shrink (and the branch list disappears) on small terminals.
   let budget = height - 3 - snapshot.warnings.length;
+  const needRows = Math.min(needs.length, height < 24 ? 2 : 4);
   const attentionRows = Math.min(attention.length, height < 24 ? 2 : 5);
-  budget -= 2 + Math.max(1, attentionRows);
+  budget -= 2 + Math.max(1, attentionRows + needRows + (needs.length > needRows ? 1 : 0));
   const agentRows = Math.max(1, Math.min(agents.length, Math.max(1, budget - (height < 24 ? 3 : 8))));
   budget -= 3 + agentRows;
   const branches = snapshot.branches.filter((b) => b.agent || b.pr || b.current);
@@ -211,15 +270,16 @@ export function OverviewView({ snapshot, cursor, width, height, projectCount }: 
         <Text key={i} color="yellow" wrap="truncate">{`! ${w}`}</Text>
       ))}
       <Text> </Text>
-      <Text bold>Needs attention</Text>
-      {attention.length === 0 ? <Text color="gray">Nothing right now.</Text> : null}
+      <Text bold>Needs you</Text>
+      <NeedsYou items={needs} width={width} max={needRows} />
+      {attention.length === 0 && needs.length === 0 ? <Text color="gray">Nothing right now. Press n to describe a new feature.</Text> : null}
       {attention.slice(0, attentionRows).map((a) => (
         <Text key={a.name} color="yellow" wrap="truncate">
           {truncate(
             `• ${a.name}: ${[
               a.session === 'exited' ? `agent exited${a.exitCode !== null ? ` (${a.exitCode})` : ''}, press r to restart` : null,
               (a.changes?.conflicted ?? 0) > 0 ? 'merge conflicts' : null,
-              (a.behind ?? 0) > 0 ? `${a.behind} behind ${a.base}` : null,
+              behind(a) > 0 ? `${a.behind} behind ${a.base}` : null,
               a.spawned && !a.worktreeExists ? 'worktree missing (aw repair)' : null,
             ]
               .filter(Boolean)
@@ -282,37 +342,228 @@ export function ProjectsView({ projects, selectedId, cursor, width, height, load
   );
 }
 
-export function FeaturesView({ snapshot }: { snapshot: ProjectSnapshot | null }) {
-  const manual = snapshot?.agents.length ?? 0;
+export function FeaturesView({
+  snapshot,
+  features,
+  cursor,
+  openFeature,
+  taskCursor,
+  width,
+  height,
+}: Sized & { snapshot: ProjectSnapshot | null; features: Feature[]; cursor: number; openFeature: string | null; taskCursor: number }) {
+  if (!snapshot) return <NoProject />;
+  if (snapshot.state !== 'ready') return <ProjectProblem snapshot={snapshot} />;
+  const open = openFeature ? features.find((f) => f.id === openFeature) : undefined;
+  if (open) return <PlanView feature={open} cursor={taskCursor} width={width} height={height} />;
+  if (!features.length) {
+    return (
+      <Empty
+        title={`Features · ${snapshot.project.name}`}
+        lines={[
+          'Press n (anywhere) and describe what you want, the way you would to Claude or Codex: the goal, context, files to look at (paths), constraints.',
+          'A planner reads the repository (read-only) and proposes tasks, each with an account, model effort and the reason. You review, adjust and approve with A.',
+          'Agents then work in parallel on their own branches; the conductor validates each task and merges it into one feature branch. You are called only when a decision is needed.',
+          'Small, one-off jobs: create a manual agent with + in Agents (a).',
+        ]}
+      />
+    );
+  }
+  const { start, items } = windowed(features, cursor, Math.max(1, height - 3));
   return (
-    <Empty
-      title="Features"
-      lines={[
-        'Natural-language features (describe → plan → approve → parallel execution) arrive in Milestone 3.',
-        manual
-          ? `Today this project has ${manual} manually configured agent(s): each one is a manual task. See Agents (a).`
-          : 'Today, create manual tasks with: aw spawn <name> --task "..."  (press o for a shell).',
-        'Design: docs/adr/0001-integrated-environment.md',
-      ]}
-    />
+    <Box flexDirection="column">
+      <Text bold>{`Features · ${snapshot.project.name}`}</Text>
+      <Text color="gray" wrap="truncate">
+        {truncate(`  ${pad('ID', 15)} ${pad('STATUS', 30)} TITLE`, width)}
+      </Text>
+      {items.map((f, i) => {
+        const p = progress(f);
+        const color = p.attention || f.status === 'review' ? 'yellow' : f.status === 'plan-failed' ? 'red' : f.status === 'ready' ? 'green' : f.status === 'cancelled' || f.status === 'done' ? 'gray' : undefined;
+        return (
+          <Text key={f.id} inverse={start + i === cursor} color={color} wrap="truncate">
+            {truncate(`  ${pad(f.id, 15)} ${pad(featureLine(f), 30)} ${f.title}`, width)}
+          </Text>
+        );
+      })}
+      <Text color="gray">enter open plan · n new · v details · P pull request · X cancel · C clean up</Text>
+    </Box>
   );
 }
 
-export function AccountsView({ providers, width }: { providers: ProviderInfo[] | null; width: number }) {
+export function planKeysFor(f: Feature): string {
+  switch (f.status) {
+    case 'review':
+      return 'A approve · f re-plan with feedback · c account · e effort · space skip · v details · esc back';
+    case 'running':
+      return 'w answer · r retry · i integrate · c switch account · t attach · l logs · d diff · X cancel · esc back';
+    case 'ready':
+    case 'pr-open':
+      return 'P open/refresh PR · C clean up worktrees · t attach · d diff · v details · esc back';
+    case 'plan-failed':
+      return 'f re-plan (optionally with feedback) · v details (error) · X cancel · esc back';
+    default:
+      return 'v details · esc back';
+  }
+}
+
+export function PlanView({ feature: f, cursor, width, height }: Sized & { feature: Feature; cursor: number }) {
+  const head: Array<{ text: string; color?: string; bold?: boolean }> = [
+    { text: f.title, bold: true },
+    { text: `${STATUS_LABEL[f.status]} · ${f.branch} from ${f.base} · integration ${f.integrate}${f.pr ? ` · PR #${f.pr.number} ${f.pr.url}` : ''}`, color: 'gray' },
+  ];
+  if (f.status === 'planning') {
+    head.push(
+      { text: ' ' },
+      { text: `The planner (${f.planner.route.account}, ${f.planner.route.provider}, effort ${f.planner.route.effort}) is reading the repository…`, color: 'cyan' },
+      { text: 'This usually takes 1-5 minutes. You can leave this screen or quit aw; planning continues in tmux.', color: 'gray' },
+    );
+  }
+  if (f.status === 'plan-failed') head.push({ text: ' ' }, { text: `Planning failed: ${f.planner.error ?? 'unknown error'}`, color: 'red' });
+  if (!f.plan) {
+    head.push({ text: ' ' }, { text: 'Request:', bold: true }, ...f.request.split('\n').slice(0, Math.max(1, height - 10)).map((l) => ({ text: `  ${l}` })));
+    return (
+      <Box flexDirection="column">
+        {head.map((l, i) => (
+          <Text key={i} color={l.color} bold={l.bold} wrap="truncate">
+            {truncate(l.text, width)}
+          </Text>
+        ))}
+        <Text color="gray">{planKeysFor(f)}</Text>
+      </Box>
+    );
+  }
+  head.push({ text: truncate(f.plan.summary.replace(/\s+/g, ' '), width * 2) });
+  const waves = planWaves({ tasks: f.plan.tasks.filter((t) => f.tasks.find((s) => s.id === t.id)?.status !== 'skipped') });
+  head.push({ text: `Waves: ${waves.map((w, i) => `${i + 1}) ${w.join(' + ')}`).join('   ')}`, color: 'gray' });
+  for (const q of f.plan.questions.slice(0, 2)) head.push({ text: `? ${q}`, color: 'yellow' });
+  for (const w of f.planWarnings.slice(0, 2)) head.push({ text: `! ${w}`, color: 'yellow' });
+
+  const tasks = f.tasks;
+  const selected = tasks[cursor];
+  const planned = selected ? f.plan.tasks.find((t) => t.id === selected.id) : undefined;
+  const detailLines: Array<{ text: string; color?: string }> = [];
+  if (selected && planned) {
+    detailLines.push({ text: `${planned.title}`, color: 'cyan' });
+    detailLines.push({ text: `why ${selected.route.account || '(no account)'} · effort ${selected.route.effort}: ${selected.route.reason}` });
+    detailLines.push({ text: `rating: complexity ${planned.complexity}, risk ${planned.risk} — ${planned.rationale}`, color: 'gray' });
+    for (const w of selected.route.warnings) detailLines.push({ text: `! ${w}`, color: 'yellow' });
+    detailLines.push({ text: `objective: ${planned.objective.replace(/\s+/g, ' ')}` });
+    if (planned.scope.length) detailLines.push({ text: `scope: ${planned.scope.join(', ')}`, color: 'gray' });
+    if (planned.validation.length) detailLines.push({ text: `validation: ${planned.validation.join(' && ')}`, color: 'gray' });
+    if (planned.dependsOn.length) detailLines.push({ text: `after: ${planned.dependsOn.join(', ')}`, color: 'gray' });
+    if (selected.attention) detailLines.push({ text: `>> ${selected.attention}`, color: 'yellow' });
+    if (selected.report?.summary) detailLines.push({ text: `report: ${selected.report.summary.replace(/\s+/g, ' ')}` });
+    if (selected.validation) detailLines.push({ text: `validation ${selected.validation.ok ? 'passed' : 'failed'}: ${selected.validation.output.split('\n').slice(0, 2).join(' | ')}`, color: selected.validation.ok ? 'green' : 'red' });
+  }
+  // The task table has priority over the details of the selected task.
+  const tableRows = Math.max(1, Math.min(tasks.length, height - head.length - 5));
+  const { start, items } = windowed(tasks, cursor, tableRows);
+  const detailRoom = Math.max(0, height - head.length - tableRows - 4);
+  detailLines.splice(detailRoom);
+  const color = (st: Feature['tasks'][number]['status']) => (st === 'integrated' ? 'green' : st === 'blocked' || st === 'attention' ? 'yellow' : st === 'skipped' ? 'gray' : st === 'running' || st === 'validating' ? 'cyan' : undefined);
+  return (
+    <Box flexDirection="column">
+      {head.map((l, i) => (
+        <Text key={i} color={l.color} bold={l.bold} wrap="truncate">
+          {truncate(l.text, width)}
+        </Text>
+      ))}
+      <Text color="gray" wrap="truncate">
+        {truncate(`  ${pad('TASK', 14)} ${pad('STATUS', 18)} ${pad('ACCOUNT', 16)} ${pad('EFFORT', 7)} ${pad('RATING', 10)} TITLE`, width)}
+      </Text>
+      {items.map((t, i) => {
+        const p = f.plan?.tasks.find((x) => x.id === t.id);
+        return (
+          <Text key={t.id} inverse={start + i === cursor} color={color(t.status)} wrap="truncate">
+            {truncate(
+              `${TASK_GLYPH[t.status]} ${pad(t.id, 14)} ${pad(taskStatusText(t, f.status), 18)} ${pad(t.route.account || '-', 16)} ${pad(t.route.effort, 7)} ${pad(p ? `${p.complexity[0]}/${p.risk[0]}` : '', 10)} ${p?.title ?? ''}`,
+              width,
+            )}
+          </Text>
+        );
+      })}
+      <Box flexDirection="column" marginTop={detailLines.length ? 1 : 0}>
+        {detailLines.map((l, i) => (
+          <Text key={i} color={l.color} wrap="truncate">
+            {truncate(l.text, width)}
+          </Text>
+        ))}
+      </Box>
+      <Text color="gray" wrap="truncate">
+        {truncate(planKeysFor(f), width)}
+      </Text>
+    </Box>
+  );
+}
+
+export function NeedsYou({ items, width, max }: { items: Attention[]; width: number; max: number }) {
+  if (!items.length) return null;
+  return (
+    <Box flexDirection="column">
+      {items.slice(0, max).map((a, i) => (
+        <Text key={i} color={a.kind === 'ready' ? 'green' : a.kind === 'plan-failed' ? 'red' : 'yellow'} wrap="truncate">
+          {truncate(`◆ ${a.text}`, width)}
+        </Text>
+      ))}
+      {items.length > max ? <Text color="gray">{`… ${items.length - max} more in Features (3)`}</Text> : null}
+    </Box>
+  );
+}
+
+export function AccountsView({
+  accounts,
+  providers,
+  stats,
+  cursor,
+  width,
+  settingsPath,
+}: {
+  accounts: AccountView[] | null;
+  providers: ProviderInfo[] | null;
+  stats: RoutingStats[];
+  cursor: number;
+  width: number;
+  settingsPath: string;
+}) {
+  const list = accounts ?? [];
   return (
     <Box flexDirection="column">
       <Text bold>Accounts</Text>
+      <Text color="gray" wrap="truncate">
+        {truncate(`  ${pad('ACCOUNT', 18)} ${pad('PROVIDER', 8)} ${pad('STATE', 26)} ${pad('PROJECT', 12)} LOGIN`, width)}
+      </Text>
+      {accounts === null ? <Text color="gray">Loading…</Text> : null}
+      {list.map((a, i) => {
+        const state = a.mark ? `limited${a.mark.until ? ` until ${new Date(a.mark.until).toLocaleTimeString()}` : ''}${a.mark.source === 'detected' ? ' (detected)' : ''}` : 'available';
+        const color = !a.allowed ? 'gray' : a.mark ? 'yellow' : !a.loggedIn ? 'red' : undefined;
+        return (
+          <Text key={a.name} inverse={i === cursor} color={color} wrap="truncate">
+            {truncate(
+              `  ${pad(a.name, 18)} ${pad(a.provider, 8)} ${pad(state, 26)} ${pad(a.allowed ? 'allowed' : 'not allowed', 12)} ${a.home ? `${shortPath(a.home)}${a.loggedIn ? '' : ' (not logged in: L)'}` : 'default login'}${a.tags.length ? `  [${a.tags.join(',')}]` : ''}`,
+              width,
+            )}
+          </Text>
+        );
+      })}
+      <Text color="gray" wrap="truncate">
+        {truncate(`m mark limited/available · L log in · E edit accounts and routing rules (${shortPath(settingsPath)})`, width)}
+      </Text>
       <Text color="gray" wrap="wrap">
-        Every agent currently uses the provider CLI's own login in your home directory (profile "default"). Named, isolated profiles (CODEX_HOME / CLAUDE_CONFIG_DIR, personal vs corporate policies) arrive in Milestone 2.
+        Accounts are never switched automatically. When an agent hits a limit, press c on it (Agents, or the feature plan) to continue on another account with a handoff.
       </Text>
       <Text> </Text>
+      <Text bold>Routing results (first-pass validation)</Text>
+      {stats.length === 0 ? <Text color="gray">No finished feature tasks yet. As tasks complete, this shows which effort levels pass validation the first time, so you can tune the rules.</Text> : null}
+      {stats.slice(0, 6).map((r) => (
+        <Text key={r.key} wrap="truncate">
+          {truncate(`  ${pad(r.key, 46)} ${r.firstPass}/${r.tasks} (${Math.round((100 * r.firstPass) / r.tasks)}%)`, width)}
+        </Text>
+      ))}
+      <Text> </Text>
+      <Text bold>Agent CLIs</Text>
       {providers === null ? <Text color="gray">Detecting provider CLIs…</Text> : null}
       {(providers ?? []).map((p) => (
         <Text key={p.id} wrap="truncate" color={p.installed ? undefined : 'yellow'}>
-          {truncate(
-            `${pad(p.name, 14)} ${pad(p.installed ? `installed ${p.version ?? ''}` : 'not installed', 22)} ${p.installed ? (p.missingFlags.length ? `missing flags: ${p.missingFlags.join(', ')}` : 'profile: default') : p.installHint}`,
-            width,
-          )}
+          {truncate(`  ${pad(p.name, 14)} ${pad(p.installed ? `installed ${p.version ?? ''}` : 'not installed', 22)} ${p.installed ? (p.missingFlags.length ? `missing flags: ${p.missingFlags.join(', ')}` : '') : p.installHint}`, width)}
         </Text>
       ))}
     </Box>
@@ -416,6 +667,20 @@ export function OverlayView({ overlay, projects, width, height }: { overlay: Ove
             </Text>
           ))}
           <Text color="gray">enter select · + register · esc close</Text>
+        </Box>
+      );
+    }
+    case 'picker': {
+      const { start, items } = windowed(overlay.options, overlay.cursor, Math.max(3, height - 8));
+      return (
+        <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} width={boxWidth}>
+          <Text bold wrap="wrap">{overlay.title}</Text>
+          {items.map((o, i) => (
+            <Text key={o.value} inverse={start + i === overlay.cursor} color={o.disabled ? 'gray' : undefined} wrap="truncate">
+              {truncate(o.label, boxWidth - 4)}
+            </Text>
+          ))}
+          <Text color="gray">enter choose · esc cancel</Text>
         </Box>
       );
     }

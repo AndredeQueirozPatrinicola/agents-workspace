@@ -18,30 +18,62 @@ export const VIEW_LABELS: Record<ViewId, string> = {
 };
 
 /** What a text input dialog is collecting. The new-agent form is three inputs in a row. */
-export type InputPurpose = 'register' | 'agent-name' | 'agent-provider' | 'agent-task';
+export type InputPurpose = 'register' | 'agent-name' | 'agent-provider' | 'agent-task' | 'feature-request' | 'feature-feedback' | 'task-answer';
 
 export interface AgentDraft {
   name?: string;
   provider?: string;
 }
 
-export type AgentAction = 'create' | 'attach' | 'start' | 'stop' | 'restart' | 'resume' | 'logs' | 'diff' | 'details';
+export type AgentAction = 'create' | 'attach' | 'start' | 'stop' | 'restart' | 'resume' | 'logs' | 'diff' | 'details' | 'account';
 export type ProjectAction = 'select' | 'register' | 'forget' | 'init' | 'shell';
+/** Feature list (no feature open) and plan view (a feature open) actions. */
+export type FeatureAction =
+  | 'open'
+  | 'close'
+  | 'new'
+  | 'details'
+  | 'approve'
+  | 'feedback'
+  | 'effort'
+  | 'account'
+  | 'skip'
+  | 'answer'
+  | 'retry'
+  | 'integrate'
+  | 'pr'
+  | 'cancel'
+  | 'cleanup'
+  | 'attach'
+  | 'logs'
+  | 'diff';
+export type AccountAction = 'limit' | 'login' | 'edit';
 
 /** Actions that need a confirmation before running. */
 export interface PendingAction {
-  kind: 'agent' | 'project';
-  action: AgentAction | ProjectAction;
+  kind: 'agent' | 'project' | 'feature';
+  action: AgentAction | ProjectAction | FeatureAction;
   projectId: string;
   target: string;
+  /** Feature task id, for feature actions on a task. */
+  task?: string;
 }
+
+export interface PickerOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+export type PickerPurpose = 'task-account' | 'agent-account';
 
 export type Overlay =
   | { kind: 'help' }
   | { kind: 'confirm'; title: string; message: string; pending: PendingAction }
   | { kind: 'text'; title: string; body: string; scroll: number }
-  | { kind: 'input'; title: string; value: string; purpose: InputPurpose; draft?: AgentDraft }
-  | { kind: 'switcher'; cursor: number };
+  | { kind: 'input'; title: string; value: string; purpose: InputPurpose; draft?: AgentDraft; target?: { feature: string; task?: string } }
+  | { kind: 'switcher'; cursor: number }
+  | { kind: 'picker'; title: string; options: PickerOption[]; cursor: number; purpose: PickerPurpose; target: { feature?: string; task?: string; agent?: string } };
 
 export interface Flash {
   kind: 'info' | 'success' | 'error';
@@ -52,6 +84,10 @@ export interface UiState {
   view: ViewId;
   focus: 'sidebar' | 'main';
   projectId: string | null;
+  /** Feature open in the Features view (plan view), or null for the feature list. */
+  featureId: string | null;
+  /** Task cursor inside the plan view. */
+  taskCursor: number;
   cursors: Record<ViewId, number>;
   overlay: Overlay | null;
   flash: Flash | null;
@@ -62,6 +98,8 @@ export function initialUiState(projectId: string | null = null): UiState {
     view: 'overview',
     focus: 'main',
     projectId,
+    featureId: null,
+    taskCursor: 0,
     cursors: { overview: 0, projects: 0, features: 0, agents: 0, accounts: 0, activity: 0, settings: 0 },
     overlay: null,
     flash: null,
@@ -83,6 +121,10 @@ export type Command =
   | { type: 'switcherSelect' }
   | { type: 'agent'; action: AgentAction }
   | { type: 'project'; action: ProjectAction }
+  | { type: 'feature'; action: FeatureAction }
+  | { type: 'account'; action: AccountAction }
+  | { type: 'pickerMove'; delta: number }
+  | { type: 'pickerSelect' }
   | { type: 'refresh' }
   | { type: 'refreshPrs' }
   | { type: 'newFeature' }
@@ -138,6 +180,12 @@ export function interpretKey(state: UiState, input: string, key: KeyInfo): Comma
         if (key.backspace || key.delete) return { type: 'inputBackspace' };
         if (input && !key.ctrl && !key.meta && !key.tab) return { type: 'inputChar', text: input };
         return { type: 'none' };
+      case 'picker':
+        if (key.escape || input === 'q') return { type: 'closeOverlay' };
+        if (key.downArrow || input === 'j') return { type: 'pickerMove', delta: 1 };
+        if (key.upArrow || input === 'k') return { type: 'pickerMove', delta: -1 };
+        if (key.return) return { type: 'pickerSelect' };
+        return { type: 'none' };
       case 'switcher':
         if (key.escape || input === 'q' || input === 'p') return { type: 'closeOverlay' };
         if (key.downArrow || input === 'j') return { type: 'switcherMove', delta: 1 };
@@ -167,6 +215,32 @@ export function interpretKey(state: UiState, input: string, key: KeyInfo): Comma
   }
 
   // Main panel
+  if (state.view === 'features' && state.featureId) {
+    // Plan view of one feature.
+    if (key.escape || key.leftArrow) return { type: 'feature', action: 'close' };
+    if (key.downArrow || input === 'j') return { type: 'move', delta: 1 };
+    if (key.upArrow || input === 'k') return { type: 'move', delta: -1 };
+    const planKeys: Record<string, FeatureAction> = {
+      A: 'approve',
+      f: 'feedback',
+      e: 'effort',
+      c: 'account',
+      ' ': 'skip',
+      w: 'answer',
+      r: 'retry',
+      i: 'integrate',
+      P: 'pr',
+      X: 'cancel',
+      C: 'cleanup',
+      v: 'details',
+      t: 'attach',
+      l: 'logs',
+      d: 'diff',
+    };
+    const action = planKeys[input];
+    if (action) return { type: 'feature', action };
+    if (key.return) return { type: 'feature', action: 'details' };
+  }
   if (key.escape || key.leftArrow) return { type: 'focus', focus: 'sidebar' };
   if (key.downArrow || input === 'j') return { type: 'move', delta: 1 };
   if (key.upArrow || input === 'k') return { type: 'move', delta: -1 };
@@ -183,6 +257,22 @@ export function interpretKey(state: UiState, input: string, key: KeyInfo): Comma
     if (input === 'R') return { type: 'agent', action: 'resume' };
     if (input === 'l') return { type: 'agent', action: 'logs' };
     if (input === 'd') return { type: 'agent', action: 'diff' };
+  }
+  if (state.view === 'agents' || state.view === 'overview') {
+    if (input === 'c') return { type: 'agent', action: 'account' };
+  }
+  if (state.view === 'features') {
+    if (key.return) return { type: 'feature', action: 'open' };
+    if (input === '+') return { type: 'feature', action: 'new' };
+    if (input === 'v') return { type: 'feature', action: 'details' };
+    if (input === 'X') return { type: 'feature', action: 'cancel' };
+    if (input === 'P') return { type: 'feature', action: 'pr' };
+    if (input === 'C') return { type: 'feature', action: 'cleanup' };
+  }
+  if (state.view === 'accounts') {
+    if (input === 'm') return { type: 'account', action: 'limit' };
+    if (input === 'L') return { type: 'account', action: 'login' };
+    if (input === 'E') return { type: 'account', action: 'edit' };
   }
   if (state.view === 'projects') {
     if (key.return) return { type: 'project', action: 'select' };
@@ -205,6 +295,8 @@ export interface ReduceContext {
   textLines?: number;
   /** Visible lines in the text overlay. */
   textHeight?: number;
+  /** Tasks of the open feature. */
+  taskCount?: number;
 }
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -223,6 +315,10 @@ export function reduce(state: UiState, command: Command, ctx: ReduceContext): Ui
       return { ...state, view: VIEWS[index] as ViewId };
     }
     case 'move': {
+      if (state.view === 'features' && state.featureId) {
+        const tasks = ctx.taskCount ?? 0;
+        return { ...state, taskCursor: tasks === 0 ? 0 : clamp(state.taskCursor + command.delta, 0, tasks - 1) };
+      }
       const length = ctx.lengths[state.view] ?? 0;
       const next = length === 0 ? 0 : clamp(state.cursors[state.view] + command.delta, 0, length - 1);
       return { ...state, cursors: { ...state.cursors, [state.view]: next } };
@@ -240,6 +336,12 @@ export function reduce(state: UiState, command: Command, ctx: ReduceContext): Ui
         ...state,
         overlay: { ...state.overlay, cursor: clamp(state.overlay.cursor + command.delta, 0, Math.max(0, ctx.projectCount - 1)) },
       };
+    case 'pickerMove':
+      if (state.overlay?.kind !== 'picker') return state;
+      return { ...state, overlay: { ...state.overlay, cursor: clamp(state.overlay.cursor + command.delta, 0, Math.max(0, state.overlay.options.length - 1)) } };
+    case 'feature':
+      if (command.action === 'close') return { ...state, featureId: null, taskCursor: 0 };
+      return state;
     case 'scroll': {
       if (state.overlay?.kind !== 'text') return state;
       const max = Math.max(0, (ctx.textLines ?? 0) - (ctx.textHeight ?? 1));
@@ -301,6 +403,31 @@ export const HELP_SECTIONS: Array<{ title: string; keys: Array<[string, string]>
     ],
   },
   {
+    title: 'Features (3) — describe, plan, approve, watch',
+    keys: [
+      ['n', 'new feature from anywhere: describe it like you would to Claude/Codex (files, context)'],
+      ['enter', 'open the plan of the selected feature (esc goes back)'],
+      ['A', 'approve the plan: agents start, the conductor validates and integrates'],
+      ['f', 're-plan with your feedback'],
+      ['c / e', 'change account / effort of the task (review); c on a running task switches account'],
+      ['space', 'skip / restore a task (review)'],
+      ['w', 'answer a blocked task (your text is typed into its agent)'],
+      ['r / i', 'retry a task that needs you / integrate a validated task (confirm mode)'],
+      ['t l d', 'attach to / logs of / diff of the task agent'],
+      ['P / X / C', 'open the PR when ready / cancel the feature / clean up its worktrees'],
+      ['v', 'full details: request, plan, routing reasons, events'],
+    ],
+  },
+  {
+    title: 'Accounts (5)',
+    keys: [
+      ['m', 'mark / unmark the account as limited (out of credits)'],
+      ['L', 'log in to the account (runs the CLI login with its directory)'],
+      ['E', 'edit settings.yaml: accounts and routing rules'],
+      ['c', 'in Agents: continue the selected agent on another account (handoff)'],
+    ],
+  },
+  {
     title: 'Projects',
     keys: [
       ['enter', 'select project'],
@@ -315,7 +442,7 @@ export const HELP_SECTIONS: Array<{ title: string; keys: Array<[string, string]>
     keys: [
       ['u', 'refresh now (auto-refresh every few seconds)'],
       ['g', 'refresh pull request status from GitHub (gh)'],
-      ['n', 'new feature (natural-language planning: Milestone 3)'],
+      ['n', 'new feature (natural-language request → plan)'],
     ],
   },
 ];

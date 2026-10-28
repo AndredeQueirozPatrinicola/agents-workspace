@@ -25,10 +25,10 @@ export const TASK_GLYPH: Record<TaskState['status'], string> = {
   skipped: '–',
 };
 
-export function taskStatusText(t: TaskState): string {
+export function taskStatusText(t: TaskState, featureStatus?: Feature['status']): string {
   switch (t.status) {
     case 'pending':
-      return 'waiting';
+      return featureStatus === 'review' || featureStatus === 'planning' ? 'planned' : 'waiting';
     case 'validated':
       return 'validated, waiting to integrate';
     case 'blocked':
@@ -101,7 +101,7 @@ export function featureText(f: Feature, events: FeatureEvent[] = []): string {
       const s = f.tasks.find((x) => x.id === t.id);
       if (!s) continue;
       lines.push(
-        `${TASK_GLYPH[s.status]} ${t.id} — ${t.title}   [${taskStatusText(s)}]`,
+        `${TASK_GLYPH[s.status]} ${t.id} — ${t.title}   [${taskStatusText(s, f.status)}]`,
         `    agent ${s.agent} · ${s.route.account || '(no account)'} (${s.route.provider}${s.route.model ? ` ${s.route.model}` : ''}) · effort ${s.route.effort}`,
         `    why: ${s.route.reason}; complexity ${t.complexity}, risk ${t.risk} — ${t.rationale}`,
       );

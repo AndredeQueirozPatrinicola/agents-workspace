@@ -13,6 +13,9 @@ export interface FeatureAgentInfo {
   feature: string;
   featureTitle: string;
   task: string;
+  /** Planned account and effort (until the agent's first launch records its own). */
+  account: string;
+  effort: string;
 }
 
 export async function loadFeatureAgents(stateDir: string, branchPrefix: string): Promise<{ agents: Record<string, AgentConfig>; info: Record<string, FeatureAgentInfo> }> {
@@ -38,7 +41,7 @@ export async function loadFeatureAgents(stateDir: string, branchPrefix: string):
         .map((d) => taskAgentName(feature.id, d));
       if (deps.length) entry.dependsOn = deps;
       agents[task.agent] = entry;
-      info[task.agent] = { feature: feature.id, featureTitle: feature.title, task: task.id };
+      info[task.agent] = { feature: feature.id, featureTitle: feature.title, task: task.id, account: task.route.account, effort: task.route.effort };
     }
   }
   return { agents, info };

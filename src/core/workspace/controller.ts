@@ -6,7 +6,14 @@ import type { ProjectRecord } from '../projects/registry.js';
 import { type ProjectSnapshot, type ProjectSummary, SnapshotService, recordingUi } from './snapshot.js';
 import { initWorkspace } from './init.js';
 import { packageVersion } from '../../infrastructure/filesystem/package-root.js';
-import { displayPath } from '../../infrastructure/filesystem/fs.js';
+import { displayPath, pathExists } from '../../infrastructure/filesystem/fs.js';
+import { FeatureService, type RoutingStats, routingStats } from '../features/service.js';
+import type { Feature } from '../features/store.js';
+import { featureText } from '../features/format.js';
+import { AccountService } from '../accounts/service.js';
+import { type Effort, accountAllowed, settingsFile } from '../accounts/settings.js';
+import type { AccountMark } from '../accounts/state.js';
+import { switchAccount } from '../agents/handoff.js';
 
 /**
  * The boundary between frontends (the Ink TUI today) and the application.
@@ -44,6 +51,29 @@ export interface SettingsInfo {
   workspaceDirOverride: string | null;
 }
 
+export interface AccountView {
+  name: string;
+  provider: string;
+  label: string;
+  home: string | null;
+  tags: string[];
+  implicit: boolean;
+  /** Allowed by the selected project's policy. */
+  allowed: boolean;
+  /** Configuration directory exists (or default login). */
+  loggedIn: boolean;
+  mark: AccountMark | null;
+}
+
+/** Something the frontend runs in the real terminal (login, editor). */
+export interface TerminalCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string;
+  label: string;
+}
+
 export interface WorkspaceController {
   /** Project for the directory aw was started in (registered automatically if initialized). */
   initialProject(): Promise<ProjectRecord | null>;
@@ -67,6 +97,30 @@ export interface WorkspaceController {
   activity(): ActivityEntry[];
   /** Directory to open a shell in for a project. */
   projectPath(projectId: string): Promise<string>;
+
+  // Features (ADR 0002)
+  features(projectId: string): Promise<Feature[]>;
+  featureDetails(projectId: string, featureId: string): Promise<string>;
+  /** Create a feature and start planning it in the background. */
+  createFeature(projectId: string, request: string): Promise<ActionResult & { featureId?: string }>;
+  replanFeature(projectId: string, featureId: string, feedback: string): Promise<ActionResult>;
+  approveFeature(projectId: string, featureId: string): Promise<ActionResult>;
+  cancelFeature(projectId: string, featureId: string): Promise<ActionResult>;
+  setTaskRoute(projectId: string, featureId: string, taskId: string, change: { account?: string; effort?: Effort }): Promise<ActionResult>;
+  skipTask(projectId: string, featureId: string, taskId: string, skip: boolean): Promise<ActionResult>;
+  answerTask(projectId: string, featureId: string, taskId: string, text: string): Promise<ActionResult>;
+  retryTask(projectId: string, featureId: string, taskId: string): Promise<ActionResult>;
+  integrateTask(projectId: string, featureId: string, taskId: string): Promise<ActionResult>;
+  featurePr(projectId: string, featureId: string): Promise<ActionResult>;
+  cleanupFeature(projectId: string, featureId: string): Promise<ActionResult>;
+
+  // Accounts
+  accounts(projectId: string | null): Promise<AccountView[]>;
+  setAccountLimited(name: string, limited: boolean): Promise<ActionResult>;
+  switchAgentAccount(projectId: string, agent: string, account: string): Promise<ActionResult>;
+  loginCommand(name: string): Promise<TerminalCommand>;
+  editSettingsCommand(): Promise<TerminalCommand>;
+  routingStats(projectId: string): Promise<RoutingStats[]>;
 }
 
 const MAX_ACTIVITY = 200;
@@ -300,6 +354,189 @@ export class LiveWorkspaceController implements WorkspaceController {
       tmuxSocket: this.deps.env.AW_TMUX_SOCKET || null,
       workspaceDirOverride: this.deps.env.AW_WORKSPACE_DIR || null,
     };
+  }
+
+  // ------------------------------------------------------------ features
+
+  private featureService(project: ProjectRecord, sink: (k: 'info' | 'warn' | 'error', t: string) => void = () => undefined): FeatureService {
+    return new FeatureService({
+      ...this.deps,
+      cwd: project.path,
+      ui: recordingUi(sink),
+      prompter: { confirm: async (_q, o) => Boolean(o?.assumeYes) },
+    });
+  }
+
+  async features(projectId: string): Promise<Feature[]> {
+    const project = await this.project(projectId);
+    const service = this.featureService(project);
+    try {
+      await service.reconcile();
+      // Self-healing: running features always have a conductor.
+      if (await service.ensureConductor()) this.record(project.name, 'info', 'Conductor started for running features');
+      return (await service.open()).store.list();
+    } catch {
+      return [];
+    }
+  }
+
+  async featureDetails(projectId: string, featureId: string): Promise<string> {
+    const { store } = await this.featureService(await this.project(projectId)).open();
+    return featureText(await store.require(featureId), await store.events(featureId));
+  }
+
+  async createFeature(projectId: string, request: string): Promise<ActionResult & { featureId?: string }> {
+    let featureId: string | undefined;
+    const result = await this.act(projectId, 'Feature created; planning in the background', async (project, sink) => {
+      const service = this.featureService(project, sink);
+      const f = await service.create(request);
+      featureId = f.id;
+      await service.planInBackground(f.id);
+    });
+    return featureId ? { ...result, featureId, message: `Planning "${featureId}" in the background (usually 1-5 min). You can keep working.` } : result;
+  }
+
+  replanFeature(projectId: string, featureId: string, feedback: string): Promise<ActionResult> {
+    return this.act(projectId, `Re-planning ${featureId} in the background`, async (project, sink) => {
+      await this.featureService(project, sink).replan(featureId, feedback, { background: true });
+    });
+  }
+
+  approveFeature(projectId: string, featureId: string): Promise<ActionResult> {
+    return this.act(projectId, `Approved ${featureId}: agents start now; the conductor validates and integrates their work`, async (project, sink) => {
+      await this.featureService(project, sink).approve(featureId);
+    });
+  }
+
+  cancelFeature(projectId: string, featureId: string): Promise<ActionResult> {
+    return this.act(projectId, `Cancelled ${featureId} (worktrees and branches kept)`, async (project, sink) => {
+      await this.featureService(project, sink).cancel(featureId);
+    });
+  }
+
+  setTaskRoute(projectId: string, featureId: string, taskId: string, change: { account?: string; effort?: Effort }): Promise<ActionResult> {
+    return this.act(projectId, `${taskId}: ${change.account ? `account ${change.account}` : ''}${change.account && change.effort ? ', ' : ''}${change.effort ? `effort ${change.effort}` : ''}`, async (project, sink) => {
+      await this.featureService(project, sink).setRoute(featureId, taskId, change);
+    });
+  }
+
+  skipTask(projectId: string, featureId: string, taskId: string, skip: boolean): Promise<ActionResult> {
+    return this.act(projectId, skip ? `${taskId} skipped` : `${taskId} back in the plan`, async (project, sink) => {
+      await this.featureService(project, sink).skipTask(featureId, taskId, skip);
+    });
+  }
+
+  answerTask(projectId: string, featureId: string, taskId: string, text: string): Promise<ActionResult> {
+    return this.act(projectId, `Answered ${taskId}`, async (project, sink) => {
+      await this.featureService(project, sink).answer(featureId, taskId, text);
+    });
+  }
+
+  retryTask(projectId: string, featureId: string, taskId: string): Promise<ActionResult> {
+    return this.act(projectId, `${taskId} is running again`, async (project, sink) => {
+      const service = this.featureService(project, sink);
+      await service.retry(featureId, taskId);
+      await service.ensureConductor();
+    });
+  }
+
+  integrateTask(projectId: string, featureId: string, taskId: string): Promise<ActionResult> {
+    return this.act(projectId, `Integrated ${taskId}`, async (project, sink) => {
+      const service = this.featureService(project, sink);
+      await service.integrateNow(featureId, taskId);
+      await service.advance(featureId);
+    });
+  }
+
+  featurePr(projectId: string, featureId: string): Promise<ActionResult> {
+    let url = '';
+    return this.act(projectId, 'Pull request ready', async (project, sink) => {
+      url = (await this.featureService(project, sink).pr(featureId, { yes: true })).url;
+    }).then((r) => (r.ok ? { ok: true, message: `Pull request: ${url}` } : r));
+  }
+
+  cleanupFeature(projectId: string, featureId: string): Promise<ActionResult> {
+    let removed: string[] = [];
+    return this.act(projectId, 'Feature cleaned up', async (project, sink) => {
+      removed = await this.featureService(project, sink).cleanup(featureId);
+    }).then((r) => (r.ok ? { ok: true, message: removed.length ? `Removed: ${removed.join(', ')}` : 'Nothing to remove' } : r));
+  }
+
+  // ------------------------------------------------------------ accounts
+
+  async accounts(projectId: string | null): Promise<AccountView[]> {
+    const service = new AccountService(this.deps);
+    let policy: string[] | null = null;
+    if (projectId) {
+      try {
+        const ws = await this.snapshots.serviceFor(await this.project(projectId)).open();
+        policy = ws.config.accounts ?? null;
+      } catch {
+        policy = null;
+      }
+    }
+    const marks = await service.marks.load();
+    const list = await service.accounts().catch(() => []);
+    return Promise.all(
+      list.map(async (a) => ({
+        ...a,
+        allowed: accountAllowed(a, policy),
+        loggedIn: a.home ? await pathExists(a.home) : true,
+        mark: marks[a.name] ?? null,
+      })),
+    );
+  }
+
+  async setAccountLimited(name: string, limited: boolean): Promise<ActionResult> {
+    const marks = new AccountService(this.deps).marks;
+    if (limited) await marks.markLimited(name, { note: 'marked in the dashboard' });
+    else await marks.clear(name);
+    const message = limited ? `${name} marked as limited (shown in plans; nothing switches automatically)` : `${name} is available`;
+    this.record(null, 'success', message);
+    return { ok: true, message };
+  }
+
+  switchAgentAccount(projectId: string, agent: string, account: string): Promise<ActionResult> {
+    return this.act(projectId, `${agent} continues on ${account} (handoff from Git and its terminal)`, async (project, sink) => {
+      const deps = { ...this.deps, cwd: project.path, ui: recordingUi(sink), prompter: { confirm: async () => true } };
+      await switchAccount(deps, this.snapshots.serviceFor(project, sink), agent, account);
+    });
+  }
+
+  async loginCommand(name: string): Promise<TerminalCommand> {
+    const account = await new AccountService(this.deps).require(name);
+    const provider = this.deps.providers.get(account.provider);
+    if (account.home) {
+      const { promises } = await import('node:fs');
+      await promises.mkdir(account.home, { recursive: true });
+    }
+    return {
+      command: provider.defaultCommand,
+      args: [...provider.loginArgs],
+      env: account.home ? { [provider.accountEnvVar]: account.home } : {},
+      cwd: this.deps.cwd,
+      label: provider.loginArgs.length ? `${provider.displayName} login for ${name}` : `${provider.displayName} for ${name}: log in when asked (or /login), then /exit`,
+    };
+  }
+
+  async editSettingsCommand(): Promise<TerminalCommand> {
+    const { SETTINGS_TEMPLATE } = await import('../accounts/settings.js');
+    const { writeFileExclusive } = await import('../../infrastructure/filesystem/fs.js');
+    const { promises } = await import('node:fs');
+    const file = settingsFile(this.deps.dataDir);
+    await promises.mkdir(this.deps.dataDir, { recursive: true });
+    await writeFileExclusive(file, SETTINGS_TEMPLATE);
+    const [command, ...args] = (this.deps.env.VISUAL || this.deps.env.EDITOR || 'nano').split(/\s+/).filter(Boolean);
+    return { command: command ?? 'nano', args: [...args, file], env: {}, cwd: this.deps.cwd, label: `Editing ${displayPath(file)}` };
+  }
+
+  async routingStats(projectId: string): Promise<RoutingStats[]> {
+    try {
+      const { store } = await this.featureService(await this.project(projectId)).open();
+      return routingStats(await store.list());
+    } catch {
+      return [];
+    }
   }
 
   async projectPath(projectId: string): Promise<string> {

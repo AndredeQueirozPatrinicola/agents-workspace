@@ -110,6 +110,12 @@ async function handOver(deps: Deps, intent: Exclude<Intent, { type: 'quit' }>): 
       const code = await deps.terminal.attach(intent.session);
       return code === 0 ? { kind: 'info', text: `Back from ${intent.agent}.` } : { kind: 'error', text: `tmux attach exited with code ${code}.` };
     }
+    if (intent.type === 'command') {
+      const c = intent.command;
+      out.write(`${c.label}\n`);
+      const code = await deps.runner.runInteractive(c.command, c.args, { cwd: c.cwd, env: { ...deps.env, ...c.env } });
+      return code === 0 ? { kind: 'info', text: `Done: ${c.label}` } : { kind: 'error', text: `${c.command} exited with code ${code}` };
+    }
     const shell = deps.env.SHELL || '/bin/sh';
     out.write(`Shell in ${intent.cwd}. Type "exit" to return to Agent Workspace.\n`);
     await deps.runner.runInteractive(shell, [], { cwd: intent.cwd, env: { ...deps.env, AW_TUI_SHELL: '1' } });

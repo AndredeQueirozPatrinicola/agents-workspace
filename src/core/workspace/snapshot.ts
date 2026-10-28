@@ -30,11 +30,13 @@ export interface ProjectSummary {
 
 export interface AgentView extends AgentStatus {
   model: string | null;
-  /** Provider account profile (Milestone 2); "default" uses the CLI's own login. */
+  /** Account of the last launch; "default" is the CLI's own login. */
   profile: string;
-  /** Reasoning effort (Milestone 5); null when not configured. */
+  /** Reasoning effort of the last launch; null keeps the CLI's default. */
   effort: string | null;
   lastActivity: string | null;
+  /** The feature task this agent executes, or null for a manual agent. */
+  feature: { id: string; title: string; task: string } | null;
 }
 
 export interface BranchView {
@@ -168,19 +170,25 @@ export class SnapshotService {
 
     const statuses = await service.collectStatus(ws);
     const activity = await this.deps.terminal.sessionActivity();
-    const agents: AgentView[] = statuses.map((s) => {
-      const resolved = resolveAgent(ws.config, s.name, { provider: s.provider });
-      return {
-        ...s,
-        model: resolved.model ?? null,
-        profile: 'default',
-        effort: null,
-        lastActivity: activity.get(s.sessionName)?.toISOString() ?? s.lastLaunchAt,
-      };
-    });
+    const state = await ws.state.load();
+    const agents: AgentView[] = statuses
+      .map((s) => {
+        const resolved = resolveAgent(ws.config, s.name, { provider: s.provider });
+        const record = state.agents[s.name];
+        const info = ws.featureAgents[s.name];
+        return {
+          ...s,
+          model: resolved.model ?? null,
+          profile: record?.account ?? (info?.account || 'default'),
+          effort: record?.effort ?? info?.effort ?? null,
+          lastActivity: activity.get(s.sessionName)?.toISOString() ?? s.lastLaunchAt,
+          feature: info ? { id: info.feature, title: info.featureTitle, task: info.task } : null,
+        };
+      })
+      // Grouped: feature tasks by feature, then manual agents.
+      .sort((a, b) => (a.feature ? 0 : 1) - (b.feature ? 0 : 1) || (a.feature?.id ?? '').localeCompare(b.feature?.id ?? ''));
 
     const cwd = service.repoCwd(ws);
-    const state = await ws.state.load();
     const base = await service.comparisonBase(ws, ws.config.project.baseBranch);
     const current = await this.deps.git.currentBranch(cwd);
     const refs = await this.deps.git.run(cwd, ['for-each-ref', '--sort=-committerdate', '--count=40', '--format=%(refname:short)', 'refs/heads']);

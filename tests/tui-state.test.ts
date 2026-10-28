@@ -60,6 +60,21 @@ describe('TUI navigation state', () => {
     expect(interpretKey(projects, '', { return: true })).toEqual({ type: 'project', action: 'select' });
     // Agent keys do nothing outside agent views.
     expect(interpretKey({ ...initialUiState(), view: 'settings' }, 'x', {})).toEqual({ type: 'none' });
+    // Features: list vs plan view.
+    const features = { ...initialUiState(), view: 'features' as const };
+    expect(interpretKey(features, '', { return: true })).toEqual({ type: 'feature', action: 'open' });
+    const plan = { ...features, featureId: 'f1' };
+    expect(interpretKey(plan, 'A', {})).toEqual({ type: 'feature', action: 'approve' });
+    expect(interpretKey(plan, ' ', {})).toEqual({ type: 'feature', action: 'skip' });
+    expect(interpretKey(plan, 'c', {})).toEqual({ type: 'feature', action: 'account' });
+    expect(interpretKey(plan, '', { escape: true })).toEqual({ type: 'feature', action: 'close' });
+    expect(reduce(plan, { type: 'feature', action: 'close' }, ctx).featureId).toBeNull();
+    let moved = reduce(plan, { type: 'move', delta: 5 }, { ...ctx, taskCount: 3 });
+    expect(moved.taskCursor).toBe(2);
+    moved = reduce(moved, { type: 'move', delta: -1 }, { ...ctx, taskCount: 3 });
+    expect(moved.taskCursor).toBe(1);
+    expect(interpretKey({ ...initialUiState(), view: 'agents' }, 'c', {})).toEqual({ type: 'agent', action: 'account' });
+    expect(interpretKey({ ...initialUiState(), view: 'accounts' }, 'm', {})).toEqual({ type: 'account', action: 'limit' });
   });
 
   it('captures keys while a dialog is open', () => {
