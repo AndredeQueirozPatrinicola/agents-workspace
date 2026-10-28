@@ -97,6 +97,23 @@ export class TmuxBackend implements TerminalBackend {
     }
   }
 
+  async sessionActivity(): Promise<Map<string, Date>> {
+    const activity = new Map<string, Date>();
+    try {
+      const result = await this.run(['list-sessions', '-F', '#{session_name}|#{session_activity}']);
+      if (result.exitCode !== 0) return activity;
+      for (const line of result.stdout.split('\n')) {
+        const index = line.lastIndexOf('|');
+        if (index <= 0) continue;
+        const seconds = Number.parseInt(line.slice(index + 1), 10);
+        if (Number.isFinite(seconds) && seconds > 0) activity.set(line.slice(0, index), new Date(seconds * 1000));
+      }
+    } catch {
+      /* no tmux / no server */
+    }
+    return activity;
+  }
+
   async createSession(options: CreateSessionOptions): Promise<void> {
     if (options.command.length < 2) {
       // tmux runs a single-argument command through the shell; we always pass >= 2 args to exec directly.

@@ -45,6 +45,8 @@ export interface TerminalBackend {
   assertUsable(): Promise<void>;
   hasSession(name: string): Promise<boolean>;
   listSessions(): Promise<string[]>;
+  /** Last activity time of every session (keyed by session name). */
+  sessionActivity(): Promise<Map<string, Date>>;
   createSession(options: CreateSessionOptions): Promise<void>;
   killSession(name: string): Promise<void>;
   sendKeys(name: string, keys: string[]): Promise<void>;
