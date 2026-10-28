@@ -16,6 +16,7 @@ const base: AgentLaunchContext = {
   providerArgs: [],
   agentArgs: [],
   resume: false,
+  addDirs: [],
   command: undefined,
 };
 
@@ -26,7 +27,7 @@ describe('CodexProvider', () => {
     const launch = codex.buildLaunchCommand(base);
     expect(launch.command).toBe('codex');
     expect(launch.cwd).toBe('/ws/my-saas/backend');
-    expect(launch.args).toEqual(['--cd', '/ws/my-saas/backend', { fromFile: '/state/agents/backend/prompt.md' }]);
+    expect(launch.args).toEqual(['--cd', '/ws/my-saas/backend', '--', { fromFile: '/state/agents/backend/prompt.md' }]);
     expect(launch.env).toEqual({
       AW_AGENT: 'backend',
       AW_PROJECT: 'my-saas',
@@ -52,6 +53,7 @@ describe('CodexProvider', () => {
       '--sandbox',
       'workspace-write',
       '--search',
+      '--',
       { fromFile: '/state/agents/backend/prompt.md' },
     ]);
   });
@@ -73,7 +75,16 @@ describe('ClaudeProvider', () => {
     const launch = claude.buildLaunchCommand({ ...base, model: 'sonnet' });
     expect(launch.command).toBe('claude');
     expect(launch.cwd).toBe('/ws/my-saas/backend');
-    expect(launch.args).toEqual(['--model', 'sonnet', { fromFile: '/state/agents/backend/prompt.md' }]);
+    expect(launch.args).toEqual(['--model', 'sonnet', '--', { fromFile: '/state/agents/backend/prompt.md' }]);
+  });
+
+  it('grants the shared files area and ends options with "--" so variadic flags cannot swallow the prompt', () => {
+    const launch = claude.buildLaunchCommand({ ...base, addDirs: ['/ws/my-saas/.shared'], agentArgs: ['--allowedTools', 'Edit', 'Bash(git *)'] });
+    expect(launch.args).toEqual([
+      '--add-dir', '/ws/my-saas/.shared', '--allowedTools', 'Edit', 'Bash(git *)', '--', { fromFile: '/state/agents/backend/prompt.md' },
+    ]);
+    const codex = new CodexProvider(new MockRunner()).buildLaunchCommand({ ...base, addDirs: ['/ws/my-saas/.shared'] });
+    expect(codex.args).toEqual(['--cd', '/ws/my-saas/backend', '--add-dir', '/ws/my-saas/.shared', '--', { fromFile: '/state/agents/backend/prompt.md' }]);
   });
 
   it('continues the previous conversation in the worktree on resume', () => {
@@ -85,13 +96,13 @@ describe('ClaudeProvider', () => {
 describe('provider detection', () => {
   it('detects installation, version and required flags', async () => {
     const dir = tempDir();
-    const good = fakeAgentCli(dir, 'claude', '--model <model> -c, --continue');
+    const good = fakeAgentCli(dir, 'claude', '--model <model> -c, --continue --add-dir <directories...>');
     const old = fakeAgentCli(dir, 'oldclaude', '--model only');
     const claude = new ClaudeProvider(new NodeCommandRunner());
     expect(await claude.isInstalled(good.path)).toBe(true);
     expect(await claude.getVersion(good.path)).toBe('9.9.9');
     expect(await claude.probe(good.path)).toMatchObject({ installed: true, version: '9.9.9', missingFlags: [] });
-    expect((await claude.probe(old.path)).missingFlags).toEqual(['--continue']);
+    expect((await claude.probe(old.path)).missingFlags).toEqual(['--continue', '--add-dir']);
     expect(await claude.probe('/nonexistent/claude')).toMatchObject({ installed: false, version: null });
   });
 });

@@ -33,6 +33,8 @@ export interface AgentLaunchContext {
   agentArgs: string[];
   /** Continue the previous conversation instead of starting a new one. */
   resume: boolean;
+  /** Extra directories the agent may read and write (shared files area). */
+  addDirs: string[];
   /** Override for the executable (from `providers.<id>.command`). */
   command: string | undefined;
 }

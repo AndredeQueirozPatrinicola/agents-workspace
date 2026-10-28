@@ -64,6 +64,8 @@ export interface RemoveOptions {
   branch?: string | undefined;
   /** Allow deleting ignored files that are not known build/dependency artifacts. */
   discardIgnored?: boolean | undefined;
+  /** Ignored files known to be disposable (e.g. unchanged copies of local files). */
+  disposable?: string[] | undefined;
 }
 
 export interface ManagedWorktree {
@@ -283,7 +285,8 @@ export class WorktreeManager {
         },
       );
     }
-    const ignored = (await this.git.ignoredFiles(worktreePath)).filter((f) => !isRegenerable(f));
+    const disposable = new Set((options.disposable ?? []).map((f) => f.replace(/\\/g, '/')));
+    const ignored = (await this.git.ignoredFiles(worktreePath)).filter((f) => !isRegenerable(f) && !disposable.has(f));
     if (ignored.length && !options.discardIgnored) {
       throw new AwError(`Worktree for "${agent}" contains ignored files that would be deleted; refusing to remove it.`, {
         exitCode: ExitCode.UNSAFE,

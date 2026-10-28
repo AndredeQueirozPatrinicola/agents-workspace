@@ -16,6 +16,9 @@ workspace:
   directory: auto
   terminal: tmux
   branchPrefix: agent/
+  # Uncommitted, git-ignored files copied into every new agent worktree
+  # (never overwritten; globs allowed), e.g. [".env", "apps/web/.env.local"].
+  copyFiles: []
 
 defaults:
   provider: {{provider}}

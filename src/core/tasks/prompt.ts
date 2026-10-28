@@ -21,6 +21,8 @@ export interface PromptInput {
   dependencies: Array<{ name: string; branch: string; merged: boolean }>;
   otherAgents: Array<{ name: string; branch: string; scope: string[] }>;
   extraInstructions?: string | undefined;
+  /** Shared files area (outside the repository). */
+  files?: { inbox: string; agentInbox: string; outbox: string; inputs: string[] } | undefined;
 }
 
 export function buildAgentPrompt(input: PromptInput): string {
@@ -51,6 +53,19 @@ export function buildAgentPrompt(input: PromptInput): string {
       lines.push(
         `- ${dep.name} (${dep.branch}): ${dep.merged ? `merged into ${agent.base}` : `NOT yet merged into ${agent.base}. Code against the agreed contract and do not duplicate that agent's work; report if the contract is missing.`}`,
       );
+    }
+  }
+  if (input.files) {
+    const f = input.files;
+    lines.push(
+      '',
+      'Files outside the repository (shared files area):',
+      `- Inputs from the human (specs, designs, data, screenshots) are in ${f.agentInbox} (for you) and ${f.inbox} (for all agents). Read them when relevant; do not copy them into the repository unless the task says so.`,
+      `- Put non-code deliverables (reports, analyses, exports, screenshots) in ${f.outbox}. Code and anything the project needs belongs in commits on your branch.`,
+    );
+    if (f.inputs.length) {
+      lines.push('- Input files provided for this task:');
+      for (const file of f.inputs) lines.push(`  - ${file}`);
     }
   }
   if (input.task && !input.task.isTemplate) {

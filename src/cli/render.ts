@@ -3,6 +3,8 @@ import { sessionLabel } from '../core/agents/service.js';
 import type { CheckReport } from '../core/safety/check.js';
 import type { DoctorCheck } from '../core/workspace/doctor.js';
 import type { PrStatusRow } from '../core/github/pr-service.js';
+import type { FileEntry, SharedListing } from '../core/files/shared.js';
+import path from 'node:path';
 import { displayPath } from '../infrastructure/filesystem/fs.js';
 import { colors as c, padVisible, symbols, table } from '../infrastructure/terminal/ui.js';
 
@@ -118,4 +120,27 @@ export function renderPrStatus(rows: PrStatusRow[]): string {
     return [r.agent, r.branch, `#${p.number} ${state}`, checks, review, p.url];
   });
   return table(['AGENT', 'BRANCH', 'PR', 'CHECKS', 'REVIEW', 'URL'], body);
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+export function renderFiles(listing: SharedListing): string {
+  const out: string[] = [c.bold('Shared files') + c.dim(`  ${displayPath(listing.root)}`), ''];
+  const rel = (f: FileEntry, base: string) => path.relative(base, f.path);
+  const block = (title: string, files: FileEntry[], base: string) => {
+    out.push(title);
+    if (!files.length) out.push(c.dim('  (empty)'));
+    for (const f of files) out.push(`  ${rel(f, base)}  ${c.dim(`${formatSize(f.size)} · ${f.modified.toLocaleString()}`)}`);
+    out.push('');
+  };
+  block('Inbox (inputs; inbox/<agent>/ = for one agent)', listing.inbox, path.join(listing.root, 'inbox'));
+  const agents = Object.keys(listing.outbox);
+  if (!agents.length) out.push('Outbox', c.dim('  (empty)'), '');
+  for (const agent of agents) block(`Outbox: ${agent}`, listing.outbox[agent] ?? [], path.join(listing.root, 'outbox', agent));
+  out.push(c.dim('Add inputs: aw files add <file...> [--agent <name>] [--tell]   ·   Path: aw files path'));
+  return out.join('\n');
 }

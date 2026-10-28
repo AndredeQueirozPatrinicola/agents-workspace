@@ -109,6 +109,33 @@ Three layers of instructions, from broadest to narrowest:
 
 Let an agent draft the tasks: run `claude` (or `codex`) in the main repo and ask: *"Read the codebase and docs/contracts, then write .agents/tasks/billing.md following the format of .agents/tasks/auth.md: objective, context, scope, files, dependencies, acceptance criteria, validation."* Review it, commit, spawn.
 
+## Files: giving agents inputs, getting outputs
+
+Code always comes back as commits on the agent's branch. Review it with `aw pr <agent>`, or look directly in the worktree: `code ~/Projetos/.agent-workspace/my-saas/<agent>`, `git -C <worktree> log -p`.
+
+For everything else there is a shared area outside the repository (nothing in it can be committed by accident):
+
+```sh
+aw spawn billing --file ~/Downloads/stripe-spec.pdf --file ./mockups/   # inputs at start (listed in the prompt)
+aw files add screenshot-bug.png --agent web --tell                      # inputs later (copies + notifies the agent)
+aw files add schema-v2.sql                                              # input for every agent
+aw files                                                                # list inbox and every agent's outbox
+explorer.exe "$(aw files path)"                                         # WSL: open it in Windows Explorer
+```
+
+Agents put non-code deliverables (reports, analyses, CSV exports, screenshots) in `outbox/<agent>/`. Their prompt says so, and you can ask explicitly: `aw tell research "Write the comparison to your outbox as comparison.md"`.
+
+Images: both CLIs can read image files by path. Mention the path in a message (`aw tell web "Compare the UI with $(aw files path --agent web)/mockup.png"`). Claude Code also accepts drag-and-drop or pasted images in its pane.
+
+Local files a fresh worktree lacks (`.env`, local configs): list them once in `.agents/workspace.yaml` and every new worktree gets a copy:
+
+```yaml
+workspace:
+  copyFiles: [".env", "apps/web/.env.local"]
+```
+
+Only git-ignored files are copied, so an agent can't commit them by accident. Cleanup deletes untouched copies by itself and protects copies the agent edited.
+
 ## Handling conflicts
 
 Worktrees stop agents from overwriting each other's files. They don't stop two branches from disagreeing. The strategy has three parts: prevent, detect early, then integrate in order.
@@ -161,6 +188,8 @@ The agent is usually the best resolver: it knows why it wrote its side, and it c
 | send it a message | `aw tell <agent> "..."` |
 | look at one agent full screen | `aw attach <agent>` (or `Ctrl-a z` in the dashboard) |
 | write or edit its task | `aw edit <agent>` |
+| give it a file | `aw files add <file> --agent <agent> --tell` (or `aw spawn <agent> --file <file>`) |
+| see what agents produced | `aw files` (outboxes) · `aw pr <agent>` (code) |
 | check for conflicts | `aw check` |
 | bring main into its branch | `aw sync <agent> [--ask-agent]` |
 | publish its work | `aw pr <agent>` |

@@ -9,9 +9,12 @@ import { runDoctor } from '../core/workspace/doctor.js';
 import { repairWorkspace } from '../core/workspace/repair.js';
 import { openDashboard } from '../core/sessions/dashboard.js';
 import { AwError, ExitCode } from '../core/errors.js';
+import { type SharedPaths, addToInbox, ensureShared, listShared, sharedPaths, sharedRoot } from '../core/files/shared.js';
+import { validateAgentName } from '../core/config/loader.js';
+import { displayPath } from '../infrastructure/filesystem/fs.js';
 import { logger } from '../infrastructure/logger.js';
 import { packageVersion } from '../infrastructure/filesystem/package-root.js';
-import { renderCheck, renderDoctor, renderPrStatus, renderStatus } from './render.js';
+import { renderCheck, renderDoctor, renderFiles, renderPrStatus, renderStatus } from './render.js';
 
 /**
  * Command-line interface. Each action is a thin adapter: parse options,
@@ -26,6 +29,10 @@ function positiveInt(value: string): number {
 
 function list(value: string, previous: string[] = []): string[] {
   return [...previous, ...value.split(',').map((v) => v.trim()).filter(Boolean)];
+}
+
+function collect(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -153,11 +160,12 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .option('-r, --resume', "continue the provider's previous conversation in this worktree")
     .option('-a, --attach', 'attach to the session after starting it')
     .option('-y, --yes', 'answer yes to confirmations (e.g. adopting an existing worktree)')
+    .option('-f, --file <path>', 'input file or folder for the agent (copied to its inbox, listed in the prompt; repeatable)', collect)
     .action(
       async (
         agent: string,
         providerArgs: string[],
-        opts: { provider?: string; model?: string; branch?: string; base?: string; task?: string; taskFile?: string; prompt?: string | boolean; resume?: boolean; attach?: boolean; yes?: boolean },
+        opts: { provider?: string; model?: string; branch?: string; base?: string; task?: string; taskFile?: string; prompt?: string | boolean; resume?: boolean; attach?: boolean; yes?: boolean; file?: string[] },
       ) => {
         const { agents } = services();
         await agents.spawn(agent, {
@@ -172,6 +180,7 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
           resume: opts.resume,
           attach: opts.attach,
           yes: opts.yes,
+          files: opts.file,
           args: providerArgs,
         });
       },
@@ -194,8 +203,10 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .option('--prompt <text>', 'additional instructions appended to the initial prompt')
     .option('--no-prompt', 'start the agent CLI without an initial prompt')
     .option('-y, --yes', 'do not ask before interrupting a running agent')
-    .action(async (agent: string, opts: { resume?: boolean; prompt?: string | boolean; yes?: boolean }) => {
+    .option('-f, --file <path>', 'input file or folder for the agent (repeatable)', collect)
+    .action(async (agent: string, opts: { resume?: boolean; prompt?: string | boolean; yes?: boolean; file?: string[] }) => {
       await services().agents.restart(agent, {
+        files: opts.file,
         resume: opts.resume,
         prompt: typeof opts.prompt === 'string' ? opts.prompt : undefined,
         noPrompt: opts.prompt === false,
@@ -221,6 +232,62 @@ Exit codes: 0 ok, 1 error, 2 usage/config, 3 missing prerequisite, 4 safety chec
     .action(async (agent: string, opts: { askAgent?: boolean; fetch: boolean; yes?: boolean }) => {
       const result = await services().agents.sync(agent, opts);
       if (result.conflicts.length && !opts.askAgent) context.exitCode = ExitCode.UNSAFE;
+    });
+
+  // -------------------------------------------------------------- files
+  const files = program
+    .command('files')
+    .description('shared files area outside the repo: inputs for agents (inbox) and their non-code outputs (outbox)');
+  files
+    .command('list', { isDefault: true })
+    .description('list inbox and outbox files')
+    .option('--json', 'output machine-readable JSON')
+    .action(async (opts: { json?: boolean }) => {
+      const { d, agents } = services();
+      const ws = await agents.open();
+      await ensureShared(ws.workspaceDir);
+      const listing = await listShared(ws.workspaceDir);
+      if (opts.json) {
+        d.ui.line(JSON.stringify(listing, null, 2));
+        return;
+      }
+      d.ui.line(renderFiles(listing));
+    });
+  files
+    .command('add <paths...>')
+    .description('copy files or folders into the inbox (all agents, or one with --agent)')
+    .option('-a, --agent <name>', 'put them in this agent\'s inbox')
+    .option('--tell', 'tell the (running) agent that the files are available')
+    .action(async (paths: string[], opts: { agent?: string; tell?: boolean }) => {
+      const { d, agents } = services();
+      const ws = await agents.open();
+      if (opts.agent) validateAgentName(opts.agent);
+      if (opts.tell && !opts.agent) throw new AwError('--tell needs --agent <name>.', { exitCode: ExitCode.USAGE });
+      const shared = opts.agent ? await ensureShared(ws.workspaceDir, opts.agent) : null;
+      if (!opts.agent) await ensureShared(ws.workspaceDir);
+      const inbox = shared ? shared.agentInbox : sharedPaths(ws.workspaceDir, 'x').inbox;
+      const added = await addToInbox(paths.map((p) => path.resolve(d.cwd, p)), inbox);
+      for (const f of added) d.ui.ok(`Added ${displayPath(f)}`);
+      if (opts.tell && opts.agent) {
+        await agents.tell(opts.agent, `New input file(s) for you: ${added.join(', ')}. Read them and use them for your task.`);
+      }
+    });
+  files
+    .command('path')
+    .description('print the shared files directory (e.g. explorer.exe "$(aw files path)" on WSL)')
+    .option('-a, --agent <name>', "print this agent's inbox instead")
+    .option('--outbox', 'with --agent: print its outbox')
+    .action(async (opts: { agent?: string; outbox?: boolean }) => {
+      const { d, agents } = services();
+      const ws = await agents.open();
+      if (!opts.agent) {
+        await ensureShared(ws.workspaceDir);
+        d.ui.line(sharedRoot(ws.workspaceDir));
+        return;
+      }
+      validateAgentName(opts.agent);
+      const p = (await ensureShared(ws.workspaceDir, opts.agent)) as SharedPaths;
+      d.ui.line(opts.outbox ? p.outbox : p.agentInbox);
     });
 
   // --------------------------------------------------------------- edit

@@ -211,6 +211,7 @@ Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbo
 | `aw restart <agent> [-r] [--prompt] [--no-prompt] [-y]` | Relaunches the agent **in its existing tmux session** (dashboard panes and attached terminals stay connected). Use it after a failed login, an accidental Ctrl-C or a crash; asks before interrupting a running agent. `-r` continues the previous conversation. |
 | `aw tell <agent> <message...>` | Types a message into a running agent and presses Enter. Refused if the agent has exited (its pane is then a shell). |
 | `aw sync <agent> [--ask-agent] [--no-fetch] [-y]` | `git merge` of the base branch into the agent's branch, inside its worktree (never rebase). Refuses with uncommitted changes; on conflicts the merge is left paused and listed, and `--ask-agent` hands it to the agent to resolve, test and commit. Exit 4 on unresolved conflicts. |
+| `aw files [list\|add\|path]` | Shared files area outside the repo: `aw files add <file...> [--agent x] [--tell]` puts inputs in the inbox, `aw files` lists inbox and outboxes, `aw files path [--agent x] [--outbox]` prints a path. See [Files](#files-inputs-and-outputs). |
 | `aw edit <agent>` | Opens the agent's task file in `$VISUAL`/`$EDITOR` (creates it from the template if missing). |
 | `aw stop <agent> [-y]` | Interrupts the agent (Ctrl-C) and closes its session. Worktree, branch and commits are kept. Asks first if the agent is still running. |
 | `aw status [--json] [-w [secs]]` | Agents, providers, session state, branches, ahead/behind, uncommitted changes, task, worktree path, dependencies, cached PR. |
@@ -236,6 +237,7 @@ Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbo
 | `-r, --resume` | continue the provider's previous conversation in this worktree |
 | `-a, --attach` | attach right after starting |
 | `-y, --yes` | consent to adopting an existing worktree that aw did not create (see below) |
+| `-f, --file <path>` | input file/folder for the agent: copied to its inbox and listed in the prompt (repeatable) |
 | `-- <args...>` | passed verbatim to the provider CLI, e.g. `aw spawn api -- --sandbox workspace-write` |
 
 **Exit codes:** `0` success · `1` error · `2` usage or invalid configuration · `3` missing prerequisite (tool not installed, gh not authenticated, no remote) · `4` safety refusal (dirty worktree, busy agent, branch conflict, possible secrets, `check --strict` errors) · `130` declined confirmation / interrupted.
@@ -258,6 +260,7 @@ workspace:
   directory: auto                # "auto" | relative path (from repo root) | absolute | ~/...
   terminal: tmux                 # only tmux in this version
   branchPrefix: agent/           # default branch = <branchPrefix><agent>
+  copyFiles: [".env"]            # git-ignored local files copied into new worktrees (globs allowed)
 
 defaults:
   provider: codex                # default provider for new agents
@@ -323,6 +326,25 @@ On spawn, the agent receives an initial prompt made of:
 3. any `--prompt` text.
 
 Repository conventions are **not** duplicated: Codex reads `AGENTS.md` and Claude Code reads `CLAUDE.md` from the worktree automatically, so keep project-wide rules there. Freshly generated templates contain an `<!-- aw:template ... -->` line; while it is present, no task is sent (so an agent never starts working from placeholders). Task files over ~96 KB are referenced by path instead of inlined (OS argument-size limits).
+
+## Files: inputs and outputs
+
+Code moves through Git: agents commit on their branch, you review with `aw pr`. Everything else goes through two mechanisms:
+
+**Shared files area**: `<workspace dir>/.shared/` (e.g. `~/projects/.agent-workspace/my-saas/.shared/`), outside the repository, so nothing there can be committed by accident.
+
+```
+.shared/inbox/              inputs for all agents (specs, designs, CSVs, screenshots, PDFs)
+.shared/inbox/<agent>/      inputs for one agent
+.shared/outbox/<agent>/     non-code deliverables from one agent (reports, analyses, exports)
+```
+
+- Agents get this directory via `--add-dir` (both Codex and Claude Code), so their sandboxes allow reading and writing it. Their prompt explains the layout.
+- Inputs: `aw spawn <agent> --file spec.pdf --file designs/`, or later `aw files add mockup.png --agent web --tell` (copies it, then tells the running agent).
+- Outputs: `aw files` lists every outbox. On WSL, `explorer.exe "$(aw files path)"` opens the area in Windows Explorer.
+- Files are copied, never moved or overwritten: identical files are reused, different files with the same name get `name (2).ext`. `aw cleanup` never touches the shared area.
+
+**Local files** (`workspace.copyFiles`): uncommitted, git-ignored files a fresh worktree lacks (`.env`, `*.local.json`). They are copied from the main worktree on spawn, never overwriting. Files that are *not* git-ignored are refused with a warning, because an agent could commit them. `aw cleanup` deletes unchanged copies; if the agent edited one, cleanup refuses unless `--discard-ignored`.
 
 ## Git worktrees in Agent Workspace
 

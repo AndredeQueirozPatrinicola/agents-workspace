@@ -29,6 +29,7 @@ import {
 } from '../sessions/launcher.js';
 import type { WorkingTreeStatus } from '../git/git.js';
 import { withLock } from '../../infrastructure/filesystem/lock.js';
+import { addToInbox, copyLocalFiles, ensureShared, unchangedCopies } from '../files/shared.js';
 import { displayPath, isPathInside, pathExists, writeFileExclusive } from '../../infrastructure/filesystem/fs.js';
 import { readTemplate } from '../../infrastructure/filesystem/package-root.js';
 import { confirmOrAbort } from '../../infrastructure/terminal/prompt.js';
@@ -62,6 +63,8 @@ export interface SpawnOptions extends AddAgentOptions {
   args?: string[] | undefined;
   /** Answer yes to confirmations (adopting an unmarked worktree). */
   yes?: boolean | undefined;
+  /** Input files to hand to the agent (copied into its inbox and listed in the prompt). */
+  files?: string[] | undefined;
   /** Internal (used by restart): relaunch even if the agent is still running. */
   restartRunning?: boolean | undefined;
 }
@@ -280,6 +283,25 @@ export class AgentService {
       ui.hint(`  ${displayPath(wt.path)}`);
       await this.warnIfWorktreeInsideRepo(ws, wt.path);
 
+      // Local files (.env, ...) and the shared files area.
+      const copy = await copyLocalFiles(
+        this.deps.git,
+        ws.configRoot,
+        wt.path,
+        ws.config.workspace.copyFiles,
+        path.join(ws.state.agentDir(name), 'copied-files.json'),
+      );
+      if (copy.copied.length) ui.ok(`Local files copied: ${copy.copied.join(', ')}`);
+      if (copy.skippedNotIgnored.length) {
+        ui.warn(
+          `Not copied (not git-ignored, an agent could commit them): ${copy.skippedNotIgnored.join(', ')}. Add them to .gitignore first.`,
+        );
+      }
+      const shared = await ensureShared(ws.workspaceDir, name);
+      if (!shared) throw new AwError('Internal error: shared files area not created.');
+      const inputs = options.files?.length ? await addToInbox(options.files.map((f) => path.resolve(this.deps.cwd, f)), shared.agentInbox) : [];
+      if (inputs.length) ui.ok(`Input files: ${inputs.map((f) => path.basename(f)).join(', ')}`);
+
       const now = new Date().toISOString();
       await ws.state.upsertAgent({
         ...(existing ?? {}),
@@ -330,7 +352,10 @@ export class AgentService {
           })),
           otherAgents: others,
           extraInstructions: options.prompt,
+          files: { inbox: shared.inbox, agentInbox: shared.agentInbox, outbox: shared.outbox, inputs },
         });
+      } else if (inputs.length && options.resume) {
+        ui.info(`Resuming: tell the agent about the new files, e.g. aw tell ${name} "New input files in ${displayPath(shared.agentInbox)}"`);
       }
 
       // 4. Session
@@ -345,6 +370,7 @@ export class AgentService {
         providerArgs: providerConfig.args ?? [],
         agentArgs: [...agent.args, ...(options.args ?? [])],
         resume: Boolean(options.resume),
+        addDirs: [shared.root],
         command: providerConfig.command,
       });
       await writeLaunchFiles(files, launch, { agent: name, providerName: provider.displayName }, prompt);
@@ -754,7 +780,14 @@ export class AgentService {
       const registered = await manager.findByPath(record.worktreePath);
       const exists = await pathExists(record.worktreePath);
 
-      const removeOptions = { branch: record.branch, discardIgnored: options.discardIgnored };
+      const removeOptions = {
+        branch: record.branch,
+        discardIgnored: options.discardIgnored,
+        // Unchanged copies of local files (workspace.copyFiles) can go; edited ones are protected.
+        disposable: (await pathExists(record.worktreePath))
+          ? await unchangedCopies(record.worktreePath, path.join(ws.state.agentDir(name), 'copied-files.json'))
+          : [],
+      };
       if (registered && exists) {
         const status = await git.status(record.worktreePath);
         if (status.dirty) {

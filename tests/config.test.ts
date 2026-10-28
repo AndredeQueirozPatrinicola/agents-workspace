@@ -30,7 +30,7 @@ describe('configuration schema', () => {
     const { config, warnings } = parse(minimal);
     expect(config.project.baseBranch).toBe('main');
     expect(config.project.remote).toBe('origin');
-    expect(config.workspace).toEqual({ directory: 'auto', terminal: 'tmux', branchPrefix: 'agent/' });
+    expect(config.workspace).toEqual({ directory: 'auto', terminal: 'tmux', branchPrefix: 'agent/', copyFiles: [] });
     expect(config.defaults).toEqual({ provider: 'codex', createDraftPR: true, autoCommit: false, autoMerge: false });
     expect(config.agents).toEqual({});
     expect(warnings).toEqual([]);

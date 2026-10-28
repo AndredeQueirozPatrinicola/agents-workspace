@@ -71,9 +71,15 @@ export const workspaceConfigSchema = z
         terminal: z.enum(['tmux']).default('tmux'),
         /** Prefix for default agent branch names (`<prefix><agent>`). */
         branchPrefix: z.string().default('agent/'),
+        /**
+         * Local, uncommitted files copied from the main worktree into every new
+         * agent worktree (e.g. ".env", "apps/web/.env.local", globs allowed). Only git-ignored
+         * files are copied, never overwriting existing ones.
+         */
+        copyFiles: z.array(nonEmpty).default([]),
       })
       .strict()
-      .default({ directory: 'auto', terminal: 'tmux', branchPrefix: 'agent/' }),
+      .default({ directory: 'auto', terminal: 'tmux', branchPrefix: 'agent/', copyFiles: [] }),
     defaults: z
       .object({
         provider: nonEmpty.default('codex'),

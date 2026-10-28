@@ -67,8 +67,8 @@ function readLog(file: string): string {
 async function initWithFakes(): Promise<void> {
   expect(await aw(['init', '--provider', 'codex'])).toBe(0);
   const bin = tempDir('aw-bin-');
-  const codex = fakeAgentCli(bin, 'codex', '--model --cd resume');
-  const claude = fakeAgentCli(bin, 'claude', '--model --continue');
+  const codex = fakeAgentCli(bin, 'codex', '--model --cd --add-dir resume');
+  const claude = fakeAgentCli(bin, 'claude', '--model --continue --add-dir');
   ctx.codexLog = codex.log;
   ctx.claudeLog = claude.log;
   const file = path.join(ctx.root, '.agents', 'workspace.yaml');
@@ -115,7 +115,7 @@ describe.runIf(hasTmux())('aw end-to-end', () => {
     git(root, 'add', '.agents');
     git(root, 'commit', '-q', '-m', 'Add Agent Workspace configuration');
     const bin = tempDir('aw-bin-');
-    const claude = fakeAgentCli(bin, 'claude', '--model --continue');
+    const claude = fakeAgentCli(bin, 'claude', '--model --continue --add-dir');
     const file = path.join(root, '.agents', 'workspace.yaml');
     writeFileSync(file, readFileSync(file, 'utf8').replace('# Optional per-provider settings', `providers:\n  claude:\n    command: ${claude.path}\n\n# Optional per-provider settings`));
     expect(await aw(['spawn', 'database'])).toBe(0);
@@ -414,6 +414,62 @@ describe.runIf(hasTmux())('aw end-to-end', () => {
     expect(await aw(['add', 'api'])).toBe(0);
     expect(await aw(['edit', 'api'])).toBe(0); // no TTY in tests: prints the path
     expect(ctx.ui.out.join('\n')).toContain(path.join(ctx.root, '.agents', 'tasks', 'api.md'));
+  });
+
+  it('handles files: local copies, shared inbox/outbox, input files in the prompt', async () => {
+    await initWithFakes();
+    // Local files: .env is ignored and copied; config.local.json is NOT ignored, so it is refused.
+    writeFileSync(path.join(ctx.root, '.gitignore'), '.env\n');
+    writeFileSync(path.join(ctx.root, '.env'), 'DATABASE_URL=postgres://localhost/dev\n');
+    writeFileSync(path.join(ctx.root, 'config.local.json'), '{}');
+    git(ctx.root, 'add', '.gitignore');
+    git(ctx.root, 'commit', '-q', '-m', 'ignore env');
+    const file = path.join(ctx.root, '.agents', 'workspace.yaml');
+    writeFileSync(file, readFileSync(file, 'utf8').replace('  copyFiles: []', '  copyFiles: [".env", "config.local.json"]'));
+
+    const spec = path.join(tempDir('aw-input-'), 'spec.md');
+    writeFileSync(spec, '# Billing spec\n');
+    expect(await aw(['spawn', 'api', '-t', 'Build billing', '--file', spec])).toBe(0);
+    const text = ctx.ui.text();
+    expect(text).toContain('Local files copied: .env');
+    expect(text).toMatch(/Not copied \(not git-ignored.*config\.local\.json/);
+    expect(readFileSync(path.join(wsPath('api'), '.env'), 'utf8')).toContain('DATABASE_URL');
+    expect(git(wsPath('api'), 'status', '--porcelain')).toBe('');
+
+    const shared = path.join(ctx.parent, '.agent-workspace', 'my-saas', '.shared');
+    expect(readFileSync(path.join(shared, 'inbox', 'api', 'spec.md'), 'utf8')).toBe('# Billing spec\n');
+    await waitFor(() => readLog(ctx.codexLog).includes('---'));
+    const log = readLog(ctx.codexLog);
+    expect(log).toContain(`arg=--add-dir\narg=${shared}`);
+    expect(log).toContain(path.join(shared, 'inbox', 'api', 'spec.md'));
+    expect(log).toContain(path.join(shared, 'outbox', 'api'));
+    expect(log).toMatch(/arg=--\narg=You are the "api" agent/);
+
+    // aw files add / list / path, and --tell
+    const data = path.join(tempDir('aw-input-'), 'data.csv');
+    writeFileSync(data, 'a,b\n');
+    expect(await aw(['files', 'add', data])).toBe(0);
+    expect(await aw(['files', 'add', data])).toBe(0); // identical: reused, not duplicated
+    expect(await aw(['files', 'add', spec, '--agent', 'api', '--tell'])).toBe(0);
+    await waitFor(() => readLog(ctx.codexLog).includes('got: New input file(s) for you'));
+    writeFileSync(path.join(shared, 'outbox', 'api', 'report.md'), '# Report\n');
+    expect(await aw(['files'])).toBe(0);
+    const listing = ctx.ui.out.join('\n');
+    expect(listing).toContain('data.csv');
+    expect(listing).not.toContain('data (2).csv');
+    expect(listing).toContain('api/spec.md');
+    expect(listing).toMatch(/Outbox: api\n {2}report\.md/);
+    expect(await aw(['files', 'path', '--agent', 'api', '--outbox'])).toBe(0);
+    expect(ctx.ui.out.join('\n').trim()).toBe(path.join(shared, 'outbox', 'api'));
+
+    // Cleanup: an unchanged copied .env is disposable; an edited one is protected.
+    writeFileSync(path.join(wsPath('api'), '.env'), 'DATABASE_URL=changed-by-agent\n');
+    expect(await aw(['cleanup', 'api', '--yes'])).toBe(4);
+    expect(ctx.ui.text()).toMatch(/ignored files that would be deleted/);
+    writeFileSync(path.join(wsPath('api'), '.env'), 'DATABASE_URL=postgres://localhost/dev\n');
+    expect(await aw(['cleanup', 'api', '--yes'])).toBe(0);
+    // The shared area survives cleanup.
+    expect(existsSync(path.join(shared, 'outbox', 'api', 'report.md'))).toBe(true);
   });
 
   it('prints help and version', async () => {
