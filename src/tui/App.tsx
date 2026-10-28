@@ -68,11 +68,11 @@ function hintsFor(view: ViewId, focus: UiState['focus']): string {
   switch (view) {
     case 'overview':
     case 'agents':
-      return 't attach · s start · x stop · r restart · R resume · l logs · d diff · enter details · p projects · ? help · q quit';
+      return '+ new agent · t attach · s start · x stop · r restart · R resume · l logs · d diff · enter details · ? help · q quit';
     case 'projects':
       return 'enter select · + register · - forget · I init · o shell · p switch · ? help · q quit';
     default:
-      return 'tab sidebar · 1-7 views · p projects · u refresh · ? help · q quit';
+      return 'tab sidebar · 1-7 views · p projects · I init · o shell · u refresh · ? help · q quit';
   }
 }
 
@@ -226,8 +226,40 @@ export function App({ controller, initialState, onIntent, refreshMs = 3000, init
         }
         case 'inputSubmit': {
           if (state.overlay?.kind !== 'input') return undefined;
-          const value = state.overlay.value.trim();
+          const { value: raw, purpose, draft } = state.overlay;
+          const value = raw.trim();
           setUi((s) => ({ ...s, overlay: null }));
+          if (purpose === 'agent-name') {
+            if (!value) return flash('info', 'Cancelled.');
+            if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(value)) {
+              return flash('error', 'Agent names use lowercase letters, digits, "-" or "_" (e.g. backend, auth-api).');
+            }
+            if (agents.some((a) => a.name === value)) return flash('error', `Agent "${value}" already exists.`);
+            return setUi((s) => ({
+              ...s,
+              overlay: { kind: 'input', purpose: 'agent-provider', title: `Provider for "${value}": codex or claude`, value: 'codex', draft: { name: value } },
+            }));
+          }
+          if (purpose === 'agent-provider') {
+            if (value !== 'codex' && value !== 'claude') return flash('error', 'Provider must be "codex" or "claude".');
+            return setUi((s) => ({
+              ...s,
+              overlay: {
+                kind: 'input',
+                purpose: 'agent-task',
+                title: `What should "${draft?.name}" do? (one or two sentences; edit .agents/tasks/${draft?.name}.md later for detail)`,
+                value: '',
+                draft: { ...draft, provider: value },
+              },
+            }));
+          }
+          if (purpose === 'agent-task') {
+            if (!projectId || !draft?.name || !draft.provider) return undefined;
+            if (!value) return flash('error', 'Describe the task so the agent knows what to do.');
+            const name = draft.name;
+            const provider = draft.provider;
+            return run(`Creating and starting ${name}`, () => controller.createAgent(projectId, name, { provider, task: value }));
+          }
           if (!value) return undefined;
           return run('Registering repository', async () => {
             const result = await controller.registerProject(value);
@@ -272,6 +304,13 @@ export function App({ controller, initialState, onIntent, refreshMs = 3000, init
         }
         case 'agent': {
           if (!projectId) return flash('error', 'Select a project first (p).');
+          if (command.action === 'create') {
+            if (snapshot?.state !== 'ready') return flash('error', snapshot?.state === 'not-initialized' ? 'Initialize the project first (I).' : 'The project is not ready.');
+            return setUi((s) => ({
+              ...s,
+              overlay: { kind: 'input', purpose: 'agent-name', title: 'New agent: name (e.g. backend, auth, docs)', value: '' },
+            }));
+          }
           const agent = selectedAgent(state);
           if (!agent) return flash('error', 'No agent selected.');
           const pending = (action: PendingAction['action']): PendingAction => ({ kind: 'agent', action, projectId, target: agent.name });
@@ -334,7 +373,7 @@ export function App({ controller, initialState, onIntent, refreshMs = 3000, init
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projects, agents, controller, execute, flash, leave, refresh, run, size.rows],
+    [projects, agents, snapshot, controller, execute, flash, leave, refresh, run, size.rows],
   );
 
   useInput((input, key) => {

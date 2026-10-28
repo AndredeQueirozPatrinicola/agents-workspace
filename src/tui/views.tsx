@@ -87,7 +87,7 @@ export function AgentTable({ agents, cursor, width, height, selectable }: { agen
     return (
       <Empty
         title="No agents yet"
-        lines={['Create one from a shell (o):  aw spawn <name> --provider codex|claude --task "..."', 'Natural-language feature planning arrives in Milestone 3 (n).']}
+        lines={['Press + to create one (name, provider, task); it starts right away in its own worktree and branch.', 'Or from a shell (o):  aw spawn <name> --provider codex|claude --task "..."']}
       />
     );
   }

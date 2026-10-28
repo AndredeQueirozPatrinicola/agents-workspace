@@ -94,6 +94,9 @@ class FakeController implements WorkspaceController {
   async forgetProject(id: string) {
     return this.done(`forget ${id}`);
   }
+  async createAgent(_p: string, a: string, o: { provider: string; task: string }) {
+    return this.done(`create ${a} ${o.provider} ${o.task}`);
+  }
   async initProject(id: string) {
     return this.done(`init ${id}`);
   }
@@ -216,6 +219,35 @@ describe('TUI app', () => {
     await keys(app, 'p', '\u001B[B', '\r', '1');
     await tick(100);
     expect(app.lastFrame()).toContain('Press I to run "aw init" here.');
+    app.unmount();
+  });
+
+  it('creates an agent through a three-step form and initializes projects from any view', async () => {
+    const app = mount();
+    await tick(150);
+    await keys(app, 'a', '+');
+    expect(app.lastFrame()).toContain('New agent: name');
+    for (const ch of 'docs') app.stdin.write(ch);
+    await keys(app, '\r');
+    expect(app.lastFrame()).toContain('Provider for "docs"');
+    expect(app.lastFrame()).toContain('> codex');
+    await keys(app, '\r'); // keep the suggested provider
+    expect(app.lastFrame()).not.toContain('Provider must be');
+    expect(app.lastFrame()).toContain('What should "docs" do?');
+    for (const ch of 'Write the API docs') app.stdin.write(ch);
+    await keys(app, '\r');
+    await tick(100);
+    expect(app.controller.calls).toContain('create docs codex Write the API docs');
+
+    await keys(app, '+');
+    for (const ch of 'Bad Name') app.stdin.write(ch);
+    await keys(app, '\r');
+    expect(app.lastFrame()).toContain('Agent names use lowercase letters');
+
+    // "I" works from the Overview of an uninitialized project, not only in Projects.
+    await keys(app, 'p', '\u001B[B', '\r', '1', 'I');
+    await tick(100);
+    expect(app.controller.calls).toContain('init prj_blog');
     app.unmount();
   });
 

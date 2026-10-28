@@ -17,7 +17,15 @@ export const VIEW_LABELS: Record<ViewId, string> = {
   settings: 'Settings',
 };
 
-export type AgentAction = 'attach' | 'start' | 'stop' | 'restart' | 'resume' | 'logs' | 'diff' | 'details';
+/** What a text input dialog is collecting. The new-agent form is three inputs in a row. */
+export type InputPurpose = 'register' | 'agent-name' | 'agent-provider' | 'agent-task';
+
+export interface AgentDraft {
+  name?: string;
+  provider?: string;
+}
+
+export type AgentAction = 'create' | 'attach' | 'start' | 'stop' | 'restart' | 'resume' | 'logs' | 'diff' | 'details';
 export type ProjectAction = 'select' | 'register' | 'forget' | 'init' | 'shell';
 
 /** Actions that need a confirmation before running. */
@@ -32,7 +40,7 @@ export type Overlay =
   | { kind: 'help' }
   | { kind: 'confirm'; title: string; message: string; pending: PendingAction }
   | { kind: 'text'; title: string; body: string; scroll: number }
-  | { kind: 'input'; title: string; value: string; purpose: 'register' }
+  | { kind: 'input'; title: string; value: string; purpose: InputPurpose; draft?: AgentDraft }
   | { kind: 'switcher'; cursor: number };
 
 export interface Flash {
@@ -167,6 +175,7 @@ export function interpretKey(state: UiState, input: string, key: KeyInfo): Comma
 
   if (state.view === 'agents' || state.view === 'overview') {
     if (key.return) return { type: 'agent', action: 'details' };
+    if (input === '+') return { type: 'agent', action: 'create' };
     if (input === 't') return { type: 'agent', action: 'attach' };
     if (input === 's') return { type: 'agent', action: 'start' };
     if (input === 'x') return { type: 'agent', action: 'stop' };
@@ -179,8 +188,10 @@ export function interpretKey(state: UiState, input: string, key: KeyInfo): Comma
     if (key.return) return { type: 'project', action: 'select' };
     if (input === '+' || input === 'i') return { type: 'project', action: 'register' };
     if (input === '-' || input === 'x') return { type: 'project', action: 'forget' };
-    if (input === 'I') return { type: 'project', action: 'init' };
   }
+  // Project-level keys that work from every view (they act on the selected project;
+  // in the Projects view, on the highlighted row).
+  if (input === 'I') return { type: 'project', action: 'init' };
   if (input === 'o') return { type: 'project', action: 'shell' };
   return { type: 'none' };
 }
@@ -279,6 +290,7 @@ export const HELP_SECTIONS: Array<{ title: string; keys: Array<[string, string]>
   {
     title: 'Agents (Agents / Overview)',
     keys: [
+      ['+', 'new agent: name, provider and task, then it starts'],
       ['enter', 'details of the selected agent'],
       ['t', 'attach to its terminal (detach with Ctrl-b d to come back)'],
       ['s', 'start (spawn) the agent'],
@@ -294,8 +306,8 @@ export const HELP_SECTIONS: Array<{ title: string; keys: Array<[string, string]>
       ['enter', 'select project'],
       ['+', 'register a repository (path input)'],
       ['-', 'forget project (repository untouched)'],
-      ['I', 'initialize .agents/ in a registered repository'],
-      ['o', 'open a shell in the selected project (exit to return)'],
+      ['I', 'initialize .agents/ in the selected project (any view)'],
+      ['o', 'open a shell in the selected project, any view (type exit to return)'],
     ],
   },
   {

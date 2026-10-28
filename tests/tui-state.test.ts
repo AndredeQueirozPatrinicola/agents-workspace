@@ -55,6 +55,8 @@ describe('TUI navigation state', () => {
     expect(interpretKey(projects, '+', {})).toEqual({ type: 'project', action: 'register' });
     expect(interpretKey(projects, '-', {})).toEqual({ type: 'project', action: 'forget' });
     expect(interpretKey(projects, 'I', {})).toEqual({ type: 'project', action: 'init' });
+    expect(interpretKey(initialUiState(), 'I', {})).toEqual({ type: 'project', action: 'init' }); // any view
+    expect(interpretKey(agents, '+', {})).toEqual({ type: 'agent', action: 'create' });
     expect(interpretKey(projects, '', { return: true })).toEqual({ type: 'project', action: 'select' });
     // Agent keys do nothing outside agent views.
     expect(interpretKey({ ...initialUiState(), view: 'settings' }, 'x', {})).toEqual({ type: 'none' });

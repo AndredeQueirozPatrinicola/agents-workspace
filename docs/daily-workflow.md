@@ -18,6 +18,27 @@ aw cleanup backend --delete-branch   # after the PR is merged
 
 Rule of thumb: **one agent = one branch = one PR-sized piece of work.** Small tasks merge easily; big ones conflict.
 
+## Day to day in the dashboard
+
+Everything below can be done without leaving `aw`:
+
+| Step | Keys |
+|------|------|
+| Open the dashboard | `aw` (in any directory; inside an initialized repo it selects that project) |
+| Register a repository | `2` (Projects) → `+` → type the path → `enter` |
+| Select it | `enter` on the row, or `p` from anywhere |
+| Initialize it (creates `.agents/`) | `I`, in any view. A repository with no commits needs one first: `o`, then `git add .agents && git commit -m "Add Agent Workspace"`, then `exit` |
+| Create and start an agent | `a` (Agents) → `+` → name → provider (`codex` or `claude`) → what it should do |
+| Watch it work | `t` attaches; `Ctrl-b d` comes back. `l` shows recent output without attaching |
+| See what it changed | `d` (commits, files, diff, uncommitted changes) |
+| It quit or got stuck | `r` restarts it in the same session; `R` restarts and resumes the conversation |
+| Stop it for today | `x` (asks first; nothing is lost) |
+| Run git, tests, `aw pr`, `aw sync`, … | `o` opens a shell in the project; `exit` returns |
+| Refresh PR status | `g` |
+| Leave | `q`. Agents keep running; `aw` brings you back |
+
+The CLI commands below do the same things and are handy in the `o` shell or in scripts.
+
 ## Before the first spawn: log in once
 
 Each agent CLI keeps its own login. Do it once in a normal terminal (not inside `aw`):

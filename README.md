@@ -219,8 +219,9 @@ Agent Workspace · my-saas · 2/3 running                                       
 t attach · s start · x stop · r restart · R resume · l logs · d diff · enter details · ? help
 ```
 
-- **Projects** (`2`, or `p` anywhere): register Git repositories by path (`+`); they are used in place, never copied. Switch between them, forget them (`-`, which leaves the repository untouched), initialize `.agents/` (`I`), or open a shell in one (`o`). Initialized repositories also register themselves whenever you run an `aw` command inside them. The registry lives in the machine-local data directory: `$AW_DATA_DIR`, `$XDG_DATA_HOME/agent-workspace`, `~/.local/share/agent-workspace`, or on macOS `~/Library/Application Support/agent-workspace`.
+- **Projects** (`2`, or `p` anywhere): register Git repositories by path (`+`); they are used in place, never copied. Switch between them, forget them (`-`, which leaves the repository untouched), initialize `.agents/` (`I`, from any view), or open a shell in one (`o`, from any view). Initialized repositories also register themselves whenever you run an `aw` command inside them. The registry lives in the machine-local data directory: `$AW_DATA_DIR`, `$XDG_DATA_HOME/agent-workspace`, `~/.local/share/agent-workspace`, or on macOS `~/Library/Application Support/agent-workspace`.
 - **Agents** (`a`): each agent shows its provider, profile, model, effort, task, state, worktree, branch, ahead/behind, changes, last activity, exit status and PR. Keys:
+  - `+` creates an agent (name, provider, task) and starts it in its own worktree and branch.
   - `t` attaches to the agent's tmux session; detach with `Ctrl-b d` to come back to the dashboard.
   - `s` starts it, `x` stops it (asks first), `r` restarts it in the same session, `R` restarts and resumes the conversation.
   - `l` shows its terminal output, `d` shows its diff (commits, changed files, uncommitted changes).

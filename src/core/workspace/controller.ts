@@ -52,6 +52,8 @@ export interface WorkspaceController {
   registerProject(anyPath: string): Promise<ActionResult & { project?: ProjectRecord }>;
   forgetProject(projectId: string): Promise<ActionResult>;
   initProject(projectId: string): Promise<ActionResult>;
+  /** Add an agent to workspace.yaml with a task, then start it. */
+  createAgent(projectId: string, agent: string, options: { provider: string; task: string }): Promise<ActionResult>;
   startAgent(projectId: string, agent: string, options?: { resume?: boolean }): Promise<ActionResult>;
   stopAgent(projectId: string, agent: string): Promise<ActionResult>;
   restartAgent(projectId: string, agent: string, options?: { resume?: boolean }): Promise<ActionResult>;
@@ -171,10 +173,23 @@ export class LiveWorkspaceController implements WorkspaceController {
     return { ok: true, message };
   }
 
-  initProject(projectId: string): Promise<ActionResult> {
-    return this.act(projectId, 'Initialized .agents/workspace.yaml', async (project, sink) => {
-      const result = await initWorkspace({ ...this.deps, cwd: project.path, ui: recordingUi(sink) });
-      if (!result.hasCommits) sink('warn', 'The repository has no commits yet; commit .agents/ before spawning agents.');
+  async initProject(projectId: string): Promise<ActionResult> {
+    let hasCommits = true;
+    const result = await this.act(projectId, 'Initialized .agents/workspace.yaml', async (project, sink) => {
+      hasCommits = (await initWorkspace({ ...this.deps, cwd: project.path, ui: recordingUi(sink) })).hasCommits;
+    });
+    if (result.ok && !hasCommits) {
+      return {
+        ok: true,
+        message: 'Initialized. The repository has no commits yet: commit once (o for a shell, then git add .agents && git commit -m "Add Agent Workspace") before creating agents.',
+      };
+    }
+    return result.ok ? { ok: true, message: 'Initialized .agents/workspace.yaml. Next: + in Agents to create an agent (commit .agents/ when convenient).' } : result;
+  }
+
+  createAgent(projectId: string, agent: string, options: { provider: string; task: string }): Promise<ActionResult> {
+    return this.act(projectId, `Created and started ${agent} (${options.provider})`, async (project, sink) => {
+      await this.snapshots.serviceFor(project, sink).spawn(agent, { provider: options.provider, taskText: options.task });
     });
   }
 
