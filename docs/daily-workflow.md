@@ -6,8 +6,9 @@ A practical guide to using `aw` every day: the loop, the keys, recovering agents
 
 ```sh
 cd ~/Projetos/my-saas
-aw status                      # what is running, what changed overnight
-aw dashboard                   # open the control room (agents + status + shell)
+aw                             # the dashboard: projects, agents, branches, PRs (q quits, agents keep running)
+aw status                      # the same information as plain text, for scripts and quick checks
+aw dashboard                   # tmux grid of every agent's terminal side by side
 # ... agents work; you review, answer questions, steer ...
 aw check                       # any overlaps / conflicts / stale branches?
 aw sync backend                # bring main into a branch that fell behind

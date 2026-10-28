@@ -1,5 +1,7 @@
 # Architecture
 
+> For where this architecture is heading (orchestration, SQLite store, managed execution, account profiles, model routing), see [ADR 0001](adr/0001-integrated-environment.md). Milestone 1 added `core/projects` (global registry), `core/workspace/snapshot.ts` and `controller.ts` (the frontend boundary), and `src/tui` (the Ink dashboard).
+
 This document explains how Agent Workspace is put together, why, and where the risks are.
 
 ## Goals and constraints

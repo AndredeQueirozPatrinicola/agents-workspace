@@ -19,6 +19,8 @@ aw pr backend       # push + draft PR, after confirmation
 
 No cloud service, no daemon, no database, no custom IDE. `aw` orchestrates tools you already use: `git`, `tmux`, `gh`, `codex`, `claude`.
 
+**Roadmap:** Agent Workspace is evolving into an integrated environment: describe a feature, review a plan, and watch agents execute it in parallel. See [ADR 0001](docs/adr/0001-integrated-environment.md). Milestone 1 (the dashboard and project registry) is done.
+
 **New here? Read [`docs/daily-workflow.md`](docs/daily-workflow.md)**: the daily loop, dashboard keys, recovering an agent that quit, writing good task files, and handling conflicts.
 
 ---
@@ -30,6 +32,7 @@ No cloud service, no daemon, no database, no custom IDE. `aw` orchestrates tools
 - [Prerequisites and supported platforms](#prerequisites-and-supported-platforms)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [The dashboard (`aw`)](#the-dashboard-aw)
 - [Command reference](#command-reference)
 - [Configuration reference](#configuration-reference)
 - [Task files and agent context](#task-files-and-agent-context)
@@ -197,12 +200,49 @@ Status:
   aw status
 ```
 
+## The dashboard (`aw`)
+
+Run `aw` with no arguments in a terminal (or `aw ui`) to open the interactive dashboard. In scripts and pipes, `aw` prints help as before, and every command below keeps working.
+
+```
+Agent Workspace · my-saas · 2/3 running                                        ↻ 12:14:07
+┌──────────────┐┌──────────────────────────────────────────────────────────────────────┐
+│ 1 Overview   ││ my-saas                                                              │
+│ 2 Projects   ││ ~/projects/my-saas · base main · remote origin                       │
+│ 3 Features   ││ 3 agent(s): 2 running · 1 exited · 0 stopped · 0 not started         │
+│ 4 Agents     ││ Needs attention                                                      │
+│ 5 Accounts   ││ • auth: agent exited (1), press r to restart                         │
+│ 6 Activity   ││ Agents                                                               │
+│ 7 Settings   ││ AGENT     PROVIDER STATE        BRANCH          VS BASE  CHANGES  PR │
+│              ││ database  claude   ● running    agent/database  ↑1 ↓0    clean    -  │
+└──────────────┘└──────────────────────────────────────────────────────────────────────┘
+t attach · s start · x stop · r restart · R resume · l logs · d diff · enter details · ? help
+```
+
+- **Projects** (`2`, or `p` anywhere): register Git repositories by path (`+`); they are used in place, never copied. Switch between them, forget them (`-`, which leaves the repository untouched), initialize `.agents/` (`I`), or open a shell in one (`o`). Initialized repositories also register themselves whenever you run an `aw` command inside them. The registry lives in the machine-local data directory: `$AW_DATA_DIR`, `$XDG_DATA_HOME/agent-workspace`, `~/.local/share/agent-workspace`, or on macOS `~/Library/Application Support/agent-workspace`.
+- **Agents** (`a`): each agent shows its provider, profile, model, effort, task, state, worktree, branch, ahead/behind, changes, last activity, exit status and PR. Keys:
+  - `t` attaches to the agent's tmux session; detach with `Ctrl-b d` to come back to the dashboard.
+  - `s` starts it, `x` stops it (asks first), `r` restarts it in the same session, `R` restarts and resumes the conversation.
+  - `l` shows its terminal output, `d` shows its diff (commits, changed files, uncommitted changes).
+- **Overview** (`1`): what needs attention (exited agents, conflicts, branches behind base), the agents table, and branches with their PRs. `g` refreshes PR status from GitHub through `gh`.
+- **Features, Accounts, Activity, Settings**:
+  - Features shows natural-language planning (Milestone 3).
+  - Accounts shows detected CLIs and the "default" profile; named profiles arrive in Milestone 2.
+  - Activity lists what you did in this session.
+  - Settings shows the data directory and tmux settings.
+- **Keys:** `tab` switches between the sidebar and the main panel, `1`–`7` jump to a view, `↑↓`/`j k` move, `enter` inspects, `?` shows help, `q` quits. Below 90 columns the sidebar becomes a one-line tab bar.
+- **Safety:** quitting the dashboard never stops agents, since they live in tmux. Stopping or restarting a running agent and forgetting a project always ask for confirmation. Live data refreshes every 3 seconds.
+
+The tmux grid from earlier versions is still available as `aw dashboard`.
+
 ## Command reference
 
 Global options: `-C, --directory <dir>` (run as if started in `<dir>`), `--verbose` (print every executed command; same as `AW_DEBUG=1`), `-V, --version`, `-h, --help`. Every command has `--help`.
 
 | Command | What it does |
 |---------|--------------|
+| `aw` / `aw ui` | Opens the interactive dashboard (see above). Without a terminal, `aw` prints help. |
+| `aw projects [list\|add [path]\|remove <project>] [--json]` | Global registry of known repositories on this machine. `add` registers a repository in place; `remove` forgets it without touching it. |
 | `aw doctor [--json]` | Checks platform, Node, git, tmux, gh (and auth), Codex/Claude (installed, version, expected flags), and the current repository/config. Exit 3 if something required is missing. |
 | `aw init [--name] [--base] [--provider] [--remote]` | Creates `.agents/workspace.yaml`, `.agents/README.md`, `.agents/tasks/`. Never overwrites. |
 | `aw add <agent> [-p] [-b] [-m] [-t text] [-d] [--scope globs] [--depends-on agents]` | Adds an agent to the config and creates its task file, without starting it. |
@@ -473,6 +513,7 @@ The key move is **step 0**: a human commits the shared contracts (`docs/contract
 src/
 ├── index.ts                      # entry point (bin: aw)
 ├── cli/                          # commander program, run loop, rendering (thin adapters)
+├── tui/                          # Ink dashboard: pure state/keys (state.ts), views, App, launcher
 ├── core/
 │   ├── agents/service.ts         # lifecycle: add, spawn, stop, attach, status, cleanup
 │   ├── config/                   # zod schema, YAML loading, comment-preserving edits
@@ -482,7 +523,8 @@ src/
 │   ├── sessions/                 # launcher scripts, session state, dashboard
 │   ├── state/runtime-state.ts    # machine-local state in .git/agent-workspace
 │   ├── tasks/                    # task parsing, prompt building
-│   ├── workspace/                # workspace resolution, init, doctor, repair
+│   ├── projects/                 # data directory + global project registry
+│   ├── workspace/                # workspace resolution, init, doctor, repair, snapshot + controller (TUI boundary)
 │   ├── worktrees/manager.ts      # worktree creation, adoption, safe removal
 │   ├── deps.ts                   # dependency container (DI for tests)
 │   └── errors.ts                 # AwError + exit codes
@@ -493,7 +535,7 @@ src/
     └── terminal/                 # TerminalBackend interface, tmux, ui, prompts
 ```
 
-Design choices, the state model and the risk analysis are in [`docs/architecture.md`](docs/architecture.md).
+Design choices, the state model and the risk analysis are in [`docs/architecture.md`](docs/architecture.md). The direction toward an integrated environment (domain model, SQLite, managed execution, profiles, routing) is in [ADR 0001](docs/adr/0001-integrated-environment.md).
 
 ## Troubleshooting
 
