@@ -1,0 +1,47 @@
+{
+  "name": "agent-workspace",
+  "version": "0.1.0",
+  "description": "Local-first CLI for running multiple AI coding agents (Codex, Claude Code) in parallel Git worktrees with tmux sessions.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "aw": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/postbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "node --import tsx src/index.ts",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "git",
+    "worktree",
+    "tmux",
+    "codex",
+    "claude",
+    "cli"
+  ],
+  "dependencies": {
+    "commander": "^14.0.3",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.5"
+  }
+}

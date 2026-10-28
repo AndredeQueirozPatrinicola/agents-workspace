@@ -1,0 +1,42 @@
+# Agent Workspace configuration (versioned; commit this file).
+# Machine-specific state (worktree paths, tmux sessions, PIDs) is stored in
+# .git/agent-workspace/ and is never committed.
+# Reference: see "Configuration reference" in the Agent Workspace README.
+version: 1
+
+project:
+  name: {{projectName}}
+  baseBranch: {{baseBranch}}
+  remote: {{remote}}
+
+workspace:
+  # "auto" places worktrees in ../.agent-workspace/<project>/<agent>.
+  # Use a relative path (from the repo root), an absolute path, or ~/...
+  # Override per machine with the AW_WORKSPACE_DIR environment variable.
+  directory: auto
+  terminal: tmux
+  branchPrefix: agent/
+
+defaults:
+  provider: {{provider}}
+  createDraftPR: true
+  autoCommit: false
+  autoMerge: false
+
+# Optional per-provider settings (no credentials here: each CLI uses its own login).
+# providers:
+#   codex:
+#     model: gpt-5-codex
+#     args: ["--sandbox", "workspace-write"]
+#   claude:
+#     model: sonnet
+
+agents: {}
+# Example:
+# agents:
+#   backend:
+#     provider: codex
+#     branch: feat/backend
+#     task: tasks/backend.md
+#     scope: ["src/api/**"]
+#     dependsOn: [database]

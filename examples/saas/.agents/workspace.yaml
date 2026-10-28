@@ -1,0 +1,66 @@
+# Example: parallel development of a small multi-tenant SaaS.
+# Copy this .agents/ directory into your repository and adjust it.
+version: 1
+
+project:
+  name: my-saas
+  baseBranch: main
+  remote: origin
+
+workspace:
+  directory: auto
+  terminal: tmux
+  branchPrefix: feat/
+
+defaults:
+  provider: codex
+  createDraftPR: true
+  autoCommit: false
+  autoMerge: false
+
+providers:
+  codex:
+    args: ["--sandbox", "workspace-write"]
+  claude:
+    model: sonnet
+
+agents:
+  # Wave 1 — starts immediately; everything else builds on the schema.
+  database:
+    provider: claude
+    branch: feat/database
+    task: tasks/database.md
+    scope: ["src/db/**", "migrations/**"]
+
+  # Wave 1 — codes against the repository interfaces from docs/contracts.
+  backend:
+    provider: codex
+    branch: feat/backend
+    task: tasks/backend.md
+    scope: ["src/api/users/**", "src/api/projects/**", "src/services/**", "src/app.ts"]
+    dependsOn: [database]
+
+  # Wave 1 — codes against the users table contract; merges after database.
+  auth:
+    provider: claude
+    branch: feat/auth
+    task: tasks/auth.md
+    scope: ["src/auth/**", "src/api/auth/**"]
+    dependsOn: [database]
+
+  # Wave 2 — needs the authenticated identity produced by auth.
+  rbac:
+    provider: codex
+    branch: feat/rbac
+    task: tasks/rbac.md
+    scope: ["src/rbac/**", "src/api/middleware/authorize.ts"]
+    dependsOn: [auth]
+
+  # UI shell can start in wave 1 against mocked endpoints; data views
+  # are finished after backend and rbac are merged.
+  admin:
+    provider: claude
+    branch: feat/admin
+    task: tasks/admin.md
+    scope: ["apps/admin/**"]
+    dependsOn: [backend, rbac]
