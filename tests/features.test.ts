@@ -368,4 +368,53 @@ describe.runIf(hasTmux())('features', () => {
     expect(await aw('feature', 'cleanup', 'make-one-file')).toBe(0);
     expect(out.text()).toMatch(/Removed: .*integration worktree/);
   });
+
+  it('integrates only validated commits, never merges into a foreign checkout, and applies the policy to manual agents', async () => {
+    await setup([{ id: 'only', validation: ['test -f only/a.txt'] }], 'accounts: [work]\nfeatures:\n  integrate: confirm\n');
+    const s = ctx.service;
+    const f0 = await s.create('Do one thing');
+    await s.plan(f0.id);
+    await s.approve(f0.id);
+    await s.advance(f0.id);
+    const agent = `${f0.id}-only`;
+    work(agent, 'only/a.txt', 'a');
+    report(agent, 'done');
+    await s.advance(f0.id);
+    let f = await (await s.open()).store.require(f0.id);
+    expect(f.tasks[0]?.status).toBe('validated');
+    const validated = f.tasks[0]?.validatedSha;
+    expect(validated).toBe(git(worktree(agent), 'rev-parse', 'HEAD').trim());
+
+    // The agent commits again after validation: integrating re-validates the new head first.
+    work(agent, 'only/b.txt', 'b');
+    // The feature branch checked out in the main checkout blocks integration (no merge into the user's checkout).
+    git(ctx.root, 'checkout', '-q', f.branch);
+    await s.integrateNow(f0.id, 'only');
+    f = await (await s.open()).store.require(f0.id);
+    expect(f.tasks[0]?.attention).toMatch(/is checked out at/);
+    git(ctx.root, 'checkout', '-q', 'main');
+    await (await s.open()).store.update(f0.id, (x) => {
+      const t = x.tasks[0];
+      if (t) {
+        t.status = 'validated';
+        t.attention = null;
+      }
+    });
+    await s.integrateNow(f0.id, 'only');
+    f = await (await s.open()).store.require(f0.id);
+    expect(f.tasks[0]?.status).toBe('validated'); // re-validated, waiting for confirmation again
+    expect(f.tasks[0]?.validatedSha).not.toBe(validated);
+    await s.integrateNow(f0.id, 'only');
+    await s.advance(f0.id);
+    f = await (await s.open()).store.require(f0.id);
+    expect(f.status).toBe('ready');
+    expect(git(ctx.root, 'show', `${f.branch}:only/b.txt`)).toBe('b');
+
+    // Manual agents: the default login is not tagged "work", so an allowed account is chosen.
+    expect(await runCli(['node', 'aw', 'spawn', 'manual', '--task', 'x'], { cwd: ctx.root, env: ctx.deps.env, ui: captureUi(), prompter: new ScriptedPrompter(true), dataDir: ctx.deps.dataDir })).toBe(0);
+    await waitFor(() => log().split('---').some((b) => b.includes('agent=manual') && b.includes(`home=${ctx.homes.b}`)));
+    const out = captureUi();
+    expect(await runCli(['node', 'aw', 'spawn', 'other', '--provider', 'claude', '--task', 'x'], { cwd: ctx.root, env: ctx.deps.env, ui: out, prompter: new ScriptedPrompter(true), dataDir: ctx.deps.dataDir })).toBe(4);
+    expect(out.text()).toMatch(/No claude account is allowed/);
+  });
 });

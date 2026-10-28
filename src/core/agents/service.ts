@@ -35,7 +35,7 @@ import { readTemplate } from '../../infrastructure/filesystem/package-root.js';
 import { confirmOrAbort } from '../../infrastructure/terminal/prompt.js';
 import { colors } from '../../infrastructure/terminal/ui.js';
 import { AccountService } from '../accounts/service.js';
-import type { Account, Effort } from '../accounts/settings.js';
+import { type Account, type Effort, accountAllowed } from '../accounts/settings.js';
 
 /**
  * Agent lifecycle: add -> spawn -> (attach | stop | spawn again) -> pr -> cleanup.
@@ -235,6 +235,21 @@ export class AgentService {
       base: options.base,
       task: options.task,
     });
+    // A project policy (accounts: in workspace.yaml) applies to every launch, including the
+    // CLI's default login: pick an allowed account of this provider, or refuse.
+    if (!account && ws.config.accounts?.length) {
+      const ctx = await accounts.context(ws.config);
+      const allowed = ctx.accounts.filter((a) => a.provider === agent.provider && accountAllowed(a, ws.config.accounts));
+      const chosen = allowed.find((a) => !a.implicit) ?? allowed[0];
+      if (!chosen) {
+        throw new AwError(`No ${agent.provider} account is allowed in this project (accounts: ${ws.config.accounts.join(', ')}).`, {
+          exitCode: ExitCode.UNSAFE,
+          hint: 'Declare one with "aw accounts add <name> --provider ... --tag <tag>", or pass --account.',
+        });
+      }
+      account = await accounts.forLaunch(chosen.name, ws.config);
+      ui.info(`Account ${chosen.name} (allowed by this project's policy)`);
+    }
     const provider = providers.get(agent.provider);
     const providerConfig = ws.config.providers[agent.provider] ?? {};
     const command = providerConfig.command ?? provider.defaultCommand;

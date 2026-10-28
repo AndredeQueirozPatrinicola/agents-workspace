@@ -4,6 +4,7 @@ import type { Deps } from '../deps.js';
 import type { AgentService } from './service.js';
 import type { Effort } from '../accounts/settings.js';
 import { AccountService } from '../accounts/service.js';
+import { detectUsageLimit } from '../accounts/state.js';
 import { FeatureStore } from '../features/store.js';
 import { sharedPaths } from '../files/shared.js';
 import { validateAgentName } from '../config/loader.js';
@@ -42,7 +43,13 @@ export async function buildHandoff(deps: Deps, agents: AgentService, name: strin
   const status = await out(['status', '--short']);
   let terminal = '';
   if (record.session && (await deps.terminal.hasSession(record.session.name))) {
-    terminal = (await deps.terminal.capture(record.session.name, 400).catch(() => '')).trimEnd().split('\n').slice(-TERMINAL_TAIL_LINES).join('\n');
+    terminal = (await deps.terminal.capture(record.session.name, 400).catch(() => ''))
+      .trimEnd()
+      .split('\n')
+      // Usage-limit messages of the old account are noise for the new session (and would be re-detected).
+      .filter((line) => !detectUsageLimit(line))
+      .slice(-TERMINAL_TAIL_LINES)
+      .join('\n');
   }
   // Last status report the agent wrote, if any.
   const outbox = sharedPaths(ws.workspaceDir, name).outbox;

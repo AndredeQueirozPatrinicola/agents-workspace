@@ -218,6 +218,8 @@ function makeFeature(id: string, status: Feature['status'], request = 'Add JWT a
     startedAt: null,
     integratedAt: null,
     firstPass: null,
+    validatedSha: null,
+    limitSeen: null,
     ...extra,
   });
   const ptask = (tid: string, dependsOn: string[] = []) => ({

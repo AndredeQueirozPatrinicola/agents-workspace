@@ -75,37 +75,71 @@ export class NodeCommandRunner implements CommandRunner {
   run(command: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
     logger.debug(`$ ${renderCommand(command, args)}${options.cwd ? `  (cwd: ${options.cwd})` : ''}`);
     return new Promise((resolve, reject) => {
+      // Commands with a timeout get their own process group, so the whole tree
+      // (e.g. "sh -c 'npm test'" and its children) can be terminated.
+      const group = Boolean(options.timeoutMs) && process.platform !== 'win32';
       const child = spawn(command, [...args], {
         cwd: options.cwd,
         env: options.env ?? process.env,
         shell: false,
         windowsHide: true,
+        detached: group,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
-      let timer: NodeJS.Timeout | undefined;
+      const timers: NodeJS.Timeout[] = [];
+      let timedOut = false;
+      let settled = false;
+      const killTree = (signal: NodeJS.Signals) => {
+        try {
+          if (group && child.pid) process.kill(-child.pid, signal);
+          else child.kill(signal);
+        } catch {
+          /* already gone */
+        }
+      };
       if (options.timeoutMs) {
-        timer = setTimeout(() => child.kill('SIGTERM'), options.timeoutMs);
+        timers.push(
+          setTimeout(() => {
+            timedOut = true;
+            killTree('SIGTERM');
+            timers.push(setTimeout(() => killTree('SIGKILL'), 5000));
+          }, options.timeoutMs),
+        );
       }
-      child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-      child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-      child.on('error', (error: NodeJS.ErrnoException) => {
-        if (timer) clearTimeout(timer);
-        if (error.code === 'ENOENT') reject(new CommandNotFoundError(command));
-        else reject(new AwError(`Failed to start ${command}: ${error.message}`, { cause: error }));
-      });
-      child.on('close', (code, signal) => {
-        if (timer) clearTimeout(timer);
+      const finish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (settled) return;
+        settled = true;
+        for (const t of timers) clearTimeout(t);
         const result: RunResult = {
           command,
           args,
-          exitCode: code ?? (signal ? 128 + 15 : 1),
+          exitCode: timedOut ? 124 : (code ?? (signal ? 128 + 15 : 1)),
           stdout: Buffer.concat(stdout).toString('utf8'),
-          stderr: Buffer.concat(stderr).toString('utf8'),
+          stderr: Buffer.concat(stderr).toString('utf8') + (timedOut ? `\n[aw] timed out after ${Math.round((options.timeoutMs ?? 0) / 1000)}s and was terminated` : ''),
         };
         if (result.exitCode !== 0) logger.debug(`  -> exit ${result.exitCode}: ${result.stderr.trim().split('\n')[0] ?? ''}`);
         resolve(result);
+      };
+      child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+      child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+      child.on('error', (error: NodeJS.ErrnoException) => {
+        for (const t of timers) clearTimeout(t);
+        settled = true;
+        if (error.code === 'ENOENT') reject(new CommandNotFoundError(command));
+        else reject(new AwError(`Failed to start ${command}: ${error.message}`, { cause: error }));
+      });
+      child.on('close', (code, signal) => finish(code, signal));
+      // A grandchild that keeps stdout open must not block us forever after the child exited.
+      child.on('exit', (code, signal) => {
+        if (!group) return;
+        const t = setTimeout(() => {
+          child.stdout.destroy();
+          child.stderr.destroy();
+          finish(code, signal);
+        }, 2000);
+        t.unref();
       });
       child.stdin.on('error', () => {
         /* child may exit before reading stdin; ignore EPIPE */

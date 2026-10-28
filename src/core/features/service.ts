@@ -136,6 +136,8 @@ export class FeatureService {
       f.planner.finishedAt = null;
       f.planner.error = null;
     });
+    // A previous run's log must not make reconcile() think this run already ended.
+    await fsp.rm(path.join(store.plannerDir(id), 'output.log'), { force: true });
     const route = feature.planner.route;
     this.log(store, id, 'info', `Planning with ${route.account} (${route.provider}, effort ${route.effort})…`);
     try {
@@ -163,19 +165,24 @@ export class FeatureService {
         ...(this.deps.env.AW_PLANNER_TIMEOUT_MS ? { timeoutMs: Number(this.deps.env.AW_PLANNER_TIMEOUT_MS) } : {}),
       });
       const ctx = await this.routerContext(ws);
+      const taken = await this.takenAgentNames(ws, store, id);
       const updated = await store.update(id, (f) => {
+        if (f.status !== 'planning') return; // cancelled meanwhile
         f.plan = plan;
         f.planWarnings = check.warnings;
         f.title = plan.title;
-        f.tasks = plan.tasks.map((t) => this.newTaskState(f, t, ctx));
+        f.tasks = plan.tasks.map((t) => this.newTaskState(f, t, ctx, taken));
         f.status = 'review';
+        f.planner.error = null;
         f.planner.finishedAt = new Date().toISOString();
       });
+      if (updated.status !== 'review') return updated;
       this.log(store, id, 'success', `Plan ready: ${plan.tasks.length} task(s). Review and approve it.`);
       return updated;
     } catch (error) {
       const message = isAwError(error) ? [error.message, ...error.details.slice(0, 4), error.hint].filter(Boolean).join(' — ') : errorMessage(error);
       await store.update(id, (f) => {
+        if (f.status !== 'planning') return;
         f.status = 'plan-failed';
         f.planner.error = message;
         f.planner.finishedAt = new Date().toISOString();
@@ -185,8 +192,21 @@ export class FeatureService {
     }
   }
 
-  private newTaskState(feature: Feature, task: Plan['tasks'][number], ctx: RouterContext): TaskState {
+  /** Agent names used by workspace.yaml and by other features. */
+  private async takenAgentNames(ws: Workspace, store: FeatureStore, exceptFeature: string): Promise<Set<string>> {
+    const taken = new Set(Object.keys(ws.config.agents).filter((n) => ws.featureAgents[n]?.feature !== exceptFeature));
+    for (const other of await store.list()) {
+      if (other.id === exceptFeature) continue;
+      for (const t of other.tasks) taken.add(t.agent);
+    }
+    return taken;
+  }
+
+  private newTaskState(feature: Feature, task: Plan['tasks'][number], ctx: RouterContext, taken: Set<string> = new Set()): TaskState {
     const previous = feature.tasks.find((t) => t.id === task.id);
+    let agent = previous?.agent ?? taskAgentName(feature.id, task.id);
+    for (let i = 2; taken.has(agent) && i < 100; i++) agent = `${taskAgentName(feature.id, task.id).slice(0, 29)}-${i}`;
+    taken.add(agent);
     let route: RoutingDecision;
     try {
       route = routeTask(
@@ -203,7 +223,7 @@ export class FeatureService {
     }
     return {
       id: task.id,
-      agent: taskAgentName(feature.id, task.id),
+      agent,
       status: 'pending',
       // Keep a route the human changed in a previous review.
       route: previous?.route.reason.startsWith('chosen by you') ? previous.route : route,
@@ -215,6 +235,8 @@ export class FeatureService {
       startedAt: null,
       integratedAt: null,
       firstPass: null,
+      validatedSha: null,
+      limitSeen: null,
     };
   }
 
@@ -299,7 +321,7 @@ export class FeatureService {
     return store.update(id, (f) => {
       const task = f.tasks.find((t) => t.id === taskId);
       if (!task) throw new AwError(`Unknown task "${taskId}".`, { exitCode: ExitCode.USAGE });
-      if (f.status !== 'review' && task.status !== 'pending') {
+      if (f.status !== 'review' && (task.startedAt !== null || task.status === 'integrated')) {
         throw new AwError(`Task "${taskId}" already started; switch its account with: aw switch ${task.agent} <account>`, { exitCode: ExitCode.USAGE });
       }
       if (account) {
@@ -338,9 +360,9 @@ export class FeatureService {
         hint: 'Choose one in the review (c) or with: aw feature route <feature> <task> --account <name>',
       });
     }
-    const taken = new Set(Object.keys(ws.config.agents).filter((n) => !ws.featureAgents[n]));
-    const clash = f.tasks.find((t) => taken.has(t.agent));
-    if (clash) throw new AwError(`Agent name "${clash.agent}" is already used in workspace.yaml.`, { exitCode: ExitCode.USAGE });
+    const taken = await this.takenAgentNames(ws, store, id);
+    const clash = f.tasks.find((t) => t.status !== 'skipped' && taken.has(t.agent));
+    if (clash) throw new AwError(`Agent name "${clash.agent}" is already used by another agent or feature.`, { exitCode: ExitCode.USAGE, hint: `Re-plan (aw feature plan ${id}) to get new names.` });
 
     // Task files, then the feature branch.
     for (const task of f.plan.tasks) {
@@ -411,10 +433,10 @@ export class FeatureService {
     await store.update(id, (x) => {
       const t = x.tasks.find((y) => y.id === taskId);
       if (!t) return;
-      t.status = t.startedAt ? 'running' : 'pending';
+      t.status = 'running';
       t.attention = null;
       t.attempts = 0;
-      if (!t.startedAt) t.startedAt = new Date().toISOString();
+      t.startedAt = t.startedAt ?? new Date().toISOString();
     });
     this.log(store, id, 'info', 'Back to work', taskId);
   }
@@ -425,7 +447,12 @@ export class FeatureService {
     const f = await store.require(id);
     const task = f.tasks.find((t) => t.id === taskId);
     if (!task || task.status !== 'validated') throw new AwError(`Task "${taskId}" is not waiting for integration.`, { exitCode: ExitCode.USAGE });
-    await this.integrate(ws, store, f, task);
+    // Same lock as the conductor: both use the integration worktree.
+    const done = await tryWithLock(store.advanceLock(id), { purpose: 'integrate task', resource: `Feature "${id}"`, waitMs: 60_000 }, async () => {
+      await this.integrate(ws, store, f, task);
+      return true;
+    });
+    if (!done) throw new AwError(`Feature "${id}" is busy (the conductor is working on it); try again in a moment.`, { exitCode: ExitCode.UNSAFE });
   }
 
   private async sessionState(ws: Workspace, agent: string) {
@@ -444,7 +471,11 @@ export class FeatureService {
     const text = await readTextIfExists(file);
     if (text === null) return null;
     const consumed = file.replace(/status\.json$/, `status.${Date.now()}.json`);
-    await fsp.rename(file, consumed).catch(() => undefined);
+    try {
+      await fsp.rename(file, consumed);
+    } catch {
+      return null; // not consumable: never process the same report twice
+    }
     try {
       const raw = JSON.parse(text) as { status?: unknown; summary?: unknown; questions?: unknown };
       if (raw.status !== 'done' && raw.status !== 'blocked') return { invalid: `unknown status ${JSON.stringify(raw.status)}` };
@@ -560,7 +591,8 @@ export class FeatureService {
         if (record?.session) {
           const screen = await this.deps.terminal.capture(record.session.name, 60).catch(() => '');
           const limit = detectUsageLimit(screen);
-          if (limit) {
+          if (limit && limit !== task.limitSeen) {
+            await this.patchTask(store, f.id, task.id, { limitSeen: limit });
             if (task.route.account) await this.accounts.marks.markLimited(task.route.account, { source: 'detected', note: limit });
             await this.needsAttention(store, f.id, task.id, `usage limit on ${task.route.account || 'its account'}: "${limit}". Switch account (c) to continue with a handoff.`);
           }
@@ -570,6 +602,10 @@ export class FeatureService {
       case 'validating':
         // Interrupted during validation (e.g. the conductor restarted): validate again.
         await this.validate(ws, store, f.id, task.id);
+        return;
+      case 'validated':
+        // Interrupted between validation and integration.
+        if (f.integrate === 'auto') await this.integrate(ws, store, f, task);
         return;
       default:
         return;
@@ -610,6 +646,8 @@ export class FeatureService {
       await sendBack('There are no commits on your branch yet. Commit your work, then write the status file again.', 'no commits after "done"');
       return;
     }
+    // Only the commit validated here may be integrated (the agent keeps running meanwhile).
+    const sha = (await git.revParse(wt, 'HEAD')) ?? '';
 
     const results: string[] = [];
     for (const command of planned?.validation ?? []) {
@@ -632,6 +670,7 @@ export class FeatureService {
       validation: { ok: true, output: results.join('\n') || 'no validation commands', at: new Date().toISOString() },
       firstPass: task.firstPass ?? task.attempts <= 1,
       status: 'validated',
+      validatedSha: sha,
     });
     this.log(store, id, 'success', `Validated${results.length ? ` (${results.length} command(s))` : ' (no commands)'}`, taskId);
     const latest = await store.require(id);
@@ -643,28 +682,59 @@ export class FeatureService {
   }
 
   /** Integration worktree of a feature (checked out on the feature branch, outside the repository). */
-  async integrationWorktree(ws: Workspace, f: Feature): Promise<string> {
+  async integrationWorktree(ws: Workspace, f: Feature): Promise<{ path: string } | { problem: string }> {
     const target = path.join(ws.workspaceDir, '.integration', f.id);
     const cwd = this.agents.repoCwd(ws);
     const entries = await this.deps.git.listWorktrees(cwd);
     const existing = entries.find((e) => e.branch === f.branch);
-    if (existing) return existing.path;
+    if (existing) {
+      // Never merge into a checkout of the feature branch that is not ours (e.g. the user's main checkout).
+      if (!existing.path.includes(`${path.sep}.integration${path.sep}`)) {
+        return { problem: `the feature branch ${f.branch} is checked out at ${existing.path}; switch that checkout to another branch so tasks can be integrated` };
+      }
+      return { path: existing.path };
+    }
     await ensureDir(path.dirname(target));
     await this.deps.git.addWorktree(cwd, target, { branch: f.branch });
-    return target;
+    return { path: target };
   }
 
   private async integrate(ws: Workspace, store: FeatureStore, f: Feature, task: TaskState): Promise<void> {
     const git = this.deps.git;
-    const wt = await this.integrationWorktree(ws, f);
-    if (await git.mergeInProgress(wt)) await git.exec(wt, ['merge', '--abort'], 'Aborting a stale integration merge');
+    const located = await this.integrationWorktree(ws, f);
+    if ('problem' in located) {
+      await this.needsAttention(store, f.id, task.id, located.problem);
+      return;
+    }
+    const wt = located.path;
+    if (await git.mergeInProgress(wt)) {
+      // Never abort a merge someone else started (e.g. the user resolving a conflict there).
+      await this.needsAttention(store, f.id, task.id, `a merge is in progress in the integration worktree ${wt}; finish it (git commit) or abort it (git merge --abort)`);
+      return;
+    }
     const status = await git.status(wt);
     if (status.dirty) {
       await this.needsAttention(store, f.id, task.id, `the integration worktree ${wt} has local changes; commit or remove them`);
       return;
     }
     const branch = taskBranch(f.branch, task.id);
-    const result = await git.merge(wt, branch);
+    const head = await git.revParse(this.agents.repoCwd(ws), branch);
+    if (task.validatedSha && head !== task.validatedSha) {
+      // New commits after validation: validate the new head before integrating.
+      await this.patchTask(store, f.id, task.id, { status: 'validating', validatedSha: null });
+      this.log(store, f.id, 'info', 'New commits after validation; validating again', task.id);
+      await this.validate(ws, store, f.id, task.id);
+      return;
+    }
+    const ref = task.validatedSha ?? branch;
+    const merge = await git.run(wt, ['merge', '--no-ff', '-m', `Merge ${branch} into ${f.branch} (task ${task.id})`, ref]);
+    const unmerged = merge.exitCode === 0 ? '' : (await git.run(wt, ['diff', '--name-only', '--diff-filter=U'])).stdout;
+    const result = { clean: merge.exitCode === 0, conflicts: unmerged.split('\n').map((l) => l.trim()).filter(Boolean) };
+    if (!result.clean && !result.conflicts.length) {
+      if (await git.mergeInProgress(wt)) await git.exec(wt, ['merge', '--abort'], 'Aborting the failed integration merge');
+      await this.needsAttention(store, f.id, task.id, `integration failed: ${(merge.stderr || merge.stdout).trim().split('\n')[0] ?? ''}`);
+      return;
+    }
     if (result.clean) {
       await this.patchTask(store, f.id, task.id, { status: 'integrated', integratedAt: new Date().toISOString(), attention: null });
       this.log(store, f.id, 'success', `Integrated into ${f.branch}`, task.id);
@@ -673,7 +743,7 @@ export class FeatureService {
         .catch(() => undefined);
       return;
     }
-    // Only the merge we just started is undone; the feature branch is unchanged.
+    // Only the merge started just above is undone; the feature branch is unchanged.
     await git.exec(wt, ['merge', '--abort'], 'Aborting the conflicting integration merge');
     this.log(store, f.id, 'warn', `Conflicts with ${f.branch} in ${result.conflicts.join(', ')}`, task.id);
     if (task.conflicts >= MAX_CONFLICT_HANDBACKS) {

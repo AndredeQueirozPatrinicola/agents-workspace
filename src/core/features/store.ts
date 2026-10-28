@@ -70,6 +70,10 @@ const taskStateSchema = z.object({
   integratedAt: z.string().nullable().default(null),
   /** Outcome data for routing statistics. */
   firstPass: z.boolean().nullable().default(null),
+  /** Commit that passed validation (only this commit is integrated). */
+  validatedSha: z.string().nullable().default(null),
+  /** Usage-limit line already acted upon (so the same screen text is not reported twice). */
+  limitSeen: z.string().nullable().default(null),
 });
 
 export const featureSchema = z.object({
@@ -130,6 +134,7 @@ export class FeatureStore {
   }
 
   dir(id: string): string {
+    if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(id)) throw new AwError(`Invalid feature id "${id}".`, { exitCode: ExitCode.USAGE });
     return path.join(this.root, id);
   }
   file(id: string): string {
