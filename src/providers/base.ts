@@ -3,6 +3,8 @@ import { findExecutable, parseVersion } from '../infrastructure/process/shell.js
 import type {
   AgentLaunchContext,
   AgentProvider,
+  ExecCommand,
+  ExecContext,
   LaunchCommand,
   ProviderCapabilities,
   ProviderProbe,
@@ -20,7 +22,17 @@ export abstract class CliProvider implements AgentProvider {
 
   constructor(protected readonly runner: CommandRunner) {}
 
+  abstract readonly accountEnvVar: string;
+  abstract readonly loginArgs: readonly string[];
+
   abstract buildLaunchCommand(context: AgentLaunchContext): LaunchCommand;
+  abstract buildExecCommand(context: ExecContext): ExecCommand;
+  abstract parseExecResult(stdout: string, outputFileContent: string | null): unknown;
+
+  /** Account environment (configuration directory), empty for the default login. */
+  protected accountEnv(home: string | null | undefined): Record<string, string> {
+    return home ? { [this.accountEnvVar]: home } : {};
+  }
 
   async isInstalled(command = this.defaultCommand): Promise<boolean> {
     return (await findExecutable(command)) !== null;
@@ -50,6 +62,28 @@ export abstract class CliProvider implements AgentProvider {
     }
     return { installed: true, path, version, missingFlags };
   }
+}
+
+/** Parse JSON that may be wrapped in a Markdown code fence or surrounded by prose. */
+export function parseJsonLoose(text: string): unknown {
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    /* fall through */
+  }
+  const fence = /```(?:json)?\s*([\s\S]*?)```/.exec(trimmed);
+  if (fence?.[1]) {
+    try {
+      return JSON.parse(fence[1]);
+    } catch {
+      /* fall through */
+    }
+  }
+  const start = trimmed.indexOf('{');
+  const end = trimmed.lastIndexOf('}');
+  if (start >= 0 && end > start) return JSON.parse(trimmed.slice(start, end + 1));
+  throw new Error('no JSON object found');
 }
 
 /** Common environment exported into every agent session (no secrets). */

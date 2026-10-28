@@ -59,31 +59,71 @@ export class PrService {
 
   async create(name: string, options: CreatePrOptions = {}): Promise<{ url: string; created: boolean }> {
     validateAgentName(name);
-    const { ui, git, github } = this.deps;
     const ws = await this.agents.open();
-    const cwd = this.agents.repoCwd(ws);
     const record = await ws.state.getAgent(name);
     if (!record && !ws.config.agents[name]) {
       throw new AwError(`Unknown agent "${name}".`, { exitCode: ExitCode.USAGE, hint: 'Run "aw status" to list agents.' });
     }
     const agent = resolveAgent(ws.config, name, record ? { branch: record.branch, base: record.base } : {});
-    const remote = ws.config.project.remote;
+    const draft = options.draft ?? ws.config.defaults.createDraftPR;
+    const task = await loadTask(ws.configRoot, agent.task, ws.taskRoots).catch(() => null);
+    return this.publishBranch(ws, {
+      label: name,
+      branch: agent.branch,
+      base: agent.base,
+      worktree: record?.worktreePath ?? null,
+      title: options.title ?? (task?.title && !task.isTemplate ? task.title : `${name}: ${agent.branch}`),
+      bodyFile: options.bodyFile ? path.resolve(this.deps.cwd, options.bodyFile) : null,
+      body: (commits) => buildPrBody({ agent: name, provider: agent.provider, task: task && !task.isTemplate ? task : null, commits }),
+      draft,
+      yes: options.yes,
+      allowSensitive: options.allowSensitive,
+      notFoundHint: `Spawn the agent first: aw spawn ${name}`,
+      record: (pr) => this.recordPr(ws, name, pr),
+    });
+  }
 
-    ui.header(`Pull request: ${name}`);
+  /**
+   * Push a branch and open (or reuse) its pull request, after the safety
+   * checks. Shared by agent PRs and feature PRs.
+   */
+  async publishBranch(
+    ws: Workspace,
+    p: {
+      label: string;
+      branch: string;
+      base: string;
+      worktree: string | null;
+      title: string;
+      bodyFile: string | null;
+      body: (commits: string[]) => string;
+      draft: boolean;
+      yes?: boolean | undefined;
+      allowSensitive?: boolean | undefined;
+      notFoundHint?: string;
+      record: (pr: { number: number; url: string; state: string; isDraft?: boolean }) => Promise<void>;
+    },
+  ): Promise<{ url: string; created: boolean }> {
+    const { ui, git, github } = this.deps;
+    const cwd = this.agents.repoCwd(ws);
+    const remote = ws.config.project.remote;
+    const options = { yes: p.yes, allowSensitive: p.allowSensitive };
+
+    ui.header(`Pull request: ${p.label}`);
     await github.assertReady(cwd);
     await this.assertGitHubRemote(ws, cwd);
     ui.ok('GitHub CLI authenticated');
 
-    if (!(await git.branchExists(cwd, agent.branch))) {
-      throw new AwError(`Branch "${agent.branch}" does not exist locally.`, {
+    if (!(await git.branchExists(cwd, p.branch))) {
+      throw new AwError(`Branch "${p.branch}" does not exist locally.`, {
         exitCode: ExitCode.USAGE,
-        hint: `Spawn the agent first: aw spawn ${name}`,
+        ...(p.notFoundHint ? { hint: p.notFoundHint } : {}),
       });
     }
-    ui.ok(`Branch ${agent.branch}`);
+    ui.ok(`Branch ${p.branch}`);
 
-    if (record) {
-      const status = await git.status(record.worktreePath).catch(() => null);
+    if (p.worktree) {
+      const status = await git.status(p.worktree).catch(() => null);
       if (status?.dirty) {
         ui.warn(
           `The worktree has ${status.files.length} uncommitted change(s); they will NOT be part of the PR. Commit them first if they should be.`,
@@ -91,11 +131,11 @@ export class PrService {
       }
     }
 
-    const base = await this.agents.comparisonBase(ws, agent.base);
-    if (!base) throw new AwError(`Base branch "${agent.base}" not found.`, { exitCode: ExitCode.USAGE });
-    const commits = await git.commitsBetween(cwd, base, agent.branch);
+    const base = await this.agents.comparisonBase(ws, p.base);
+    if (!base) throw new AwError(`Base branch "${p.base}" not found.`, { exitCode: ExitCode.USAGE });
+    const commits = await git.commitsBetween(cwd, base, p.branch);
     if (commits.length === 0) {
-      throw new AwError(`No commits on ${agent.branch} that are not already in ${base}; nothing to publish.`, {
+      throw new AwError(`No commits on ${p.branch} that are not already in ${base}; nothing to publish.`, {
         exitCode: ExitCode.USAGE,
         hint: 'Ask the agent to commit its work (Agent Workspace never commits on its behalf).',
       });
@@ -105,9 +145,9 @@ export class PrService {
     // Safety: never publish obvious secrets or local runtime files. Scan every
     // commit the push would publish (not just the net diff): a secret added in
     // one commit and deleted in the next is still in the pushed history.
-    const files = await git.filesInPushRange(cwd, agent.branch, remote);
+    const files = await git.filesInPushRange(cwd, p.branch, remote);
     const sensitive = files.filter(isSensitivePath);
-    const secrets = scanForSecrets(await git.addedLinesInPushRange(cwd, agent.branch, remote));
+    const secrets = scanForSecrets(await git.addedLinesInPushRange(cwd, p.branch, remote));
     if (sensitive.length || secrets.length) {
       const details = [
         ...sensitive.map((f) => `sensitive file: ${f}`),
@@ -125,10 +165,10 @@ export class PrService {
     }
 
     // Existing PR?
-    const existing = await github.findPullRequest(cwd, agent.branch);
+    const existing = await github.findPullRequest(cwd, p.branch);
     if (existing && existing.state === 'OPEN') {
-      await this.pushIfNeeded(cwd, remote, agent.branch, options.yes);
-      await this.recordPr(ws, name, existing);
+      await this.pushIfNeeded(cwd, remote, p.branch, options.yes);
+      await p.record(existing);
       ui.ok(`Pull request already exists: #${existing.number}${existing.isDraft ? ' (draft)' : ''}`);
       ui.line();
       ui.line(existing.url);
@@ -136,23 +176,20 @@ export class PrService {
     }
     if (existing) ui.info(`Previous PR #${existing.number} is ${existing.state.toLowerCase()}; creating a new one.`);
 
-    await this.pushIfNeeded(cwd, remote, agent.branch, options.yes);
+    await this.pushIfNeeded(cwd, remote, p.branch, options.yes);
 
-    const draft = options.draft ?? ws.config.defaults.createDraftPR;
-    const task = await loadTask(ws.configRoot, agent.task).catch(() => null);
-    const title = options.title ?? (task?.title && !task.isTemplate ? task.title : `${name}: ${agent.branch}`);
-    let bodyFile = options.bodyFile ? path.resolve(this.deps.cwd, options.bodyFile) : null;
+    let bodyFile = p.bodyFile;
     let tmpDir: string | null = null;
     if (!bodyFile) {
       tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'aw-pr-'));
       bodyFile = path.join(tmpDir, 'body.md');
-      await fsp.writeFile(bodyFile, buildPrBody({ agent: name, provider: agent.provider, task: task && !task.isTemplate ? task : null, commits }), 'utf8');
+      await fsp.writeFile(bodyFile, p.body(commits), 'utf8');
     }
     try {
-      const url = await github.createPullRequest(cwd, { base: agent.base, head: agent.branch, title, bodyFile, draft });
-      ui.ok(`Pull request created${draft ? ' (draft)' : ''}`);
-      const created = await github.findPullRequest(cwd, agent.branch).catch(() => null);
-      if (created) await this.recordPr(ws, name, created);
+      const url = await github.createPullRequest(cwd, { base: p.base, head: p.branch, title: p.title, bodyFile, draft: p.draft });
+      ui.ok(`Pull request created${p.draft ? ' (draft)' : ''}`);
+      const created = await github.findPullRequest(cwd, p.branch).catch(() => null);
+      if (created) await p.record(created);
       ui.line();
       ui.line(url);
       return { url, created: true };

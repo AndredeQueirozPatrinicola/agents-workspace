@@ -6,6 +6,7 @@ import type { WorkspaceConfig } from '../config/schema.js';
 import { type Git, type RepoInfo } from '../git/git.js';
 import { StateStore, WORKTREE_MARKER_FILE } from '../state/runtime-state.js';
 import { canonicalPath, expandHome, pathExists } from '../../infrastructure/filesystem/fs.js';
+import { type FeatureAgentInfo, loadFeatureAgents } from '../features/agents.js';
 
 /**
  * A resolved workspace: repository + configuration + runtime state.
@@ -29,6 +30,10 @@ export interface Workspace {
   state: StateStore;
   /** Short stable id of this clone (hash of the common Git dir). */
   runtimeId: string;
+  /** Agents defined by features (runtime), merged into `config.agents`. */
+  featureAgents: Record<string, FeatureAgentInfo>;
+  /** Directories besides `.agents/` that may hold task files (feature task files live in runtime state). */
+  taskRoots: string[];
 }
 
 export async function isManagedWorktreeGitDir(gitDir: string): Promise<boolean> {
@@ -87,6 +92,17 @@ export async function openWorkspace(
     });
   }
   const loaded = await loadConfig(configRoot, knownProviders);
+  // Feature tasks: defined in runtime state; workspace.yaml wins on a name clash.
+  const features = await loadFeatureAgents(state.dir, loaded.config.features.branchPrefix);
+  const featureAgents: Record<string, FeatureAgentInfo> = {};
+  for (const [name, entry] of Object.entries(features.agents)) {
+    if (loaded.config.agents[name]) {
+      loaded.warnings.push(`Feature task agent "${name}" is shadowed by an agent with the same name in workspace.yaml.`);
+      continue;
+    }
+    loaded.config.agents[name] = entry;
+    featureAgents[name] = features.info[name] as FeatureAgentInfo;
+  }
   const current = await state.load();
   if (current.configRoot !== configRoot) {
     await state.update((s) => {
@@ -102,6 +118,8 @@ export async function openWorkspace(
     workspaceDir: resolveWorkspaceDir(configRoot, repo, loaded.config, env),
     state,
     runtimeId: runtimeIdFor(repo.commonDir),
+    featureAgents,
+    taskRoots: [state.dir],
   };
 }
 

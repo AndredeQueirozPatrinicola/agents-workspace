@@ -204,7 +204,8 @@ export class SnapshotService {
     const prefix = sessionPrefix(ws);
     const known = new Set(agents.map((a) => a.sessionName));
     const orphanSessions = (await this.deps.terminal.listSessions()).filter(
-      (s) => s.startsWith(prefix) && s !== dashboardSessionName(ws) && !known.has(s),
+      // "<prefix>-…" sessions are aw's own helpers (dashboard, conductor, planners).
+      (s) => s.startsWith(prefix) && !s.startsWith(`${prefix}-`) && s !== dashboardSessionName(ws) && !known.has(s),
     );
 
     return {

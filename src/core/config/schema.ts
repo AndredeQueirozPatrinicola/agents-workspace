@@ -92,6 +92,22 @@ export const workspaceConfigSchema = z
       .strict()
       .default({ provider: 'codex', createDraftPR: true, autoCommit: false, autoMerge: false }),
     providers: z.record(z.string(), providerConfigSchema).default({}),
+    /**
+     * Accounts allowed for this project: account names or tags from the
+     * user's settings (e.g. [work]). Omit to allow every account.
+     */
+    accounts: z.array(nonEmpty).optional(),
+    features: z
+      .object({
+        /** How validated tasks reach the feature branch: merged automatically, or after confirmation. */
+        integrate: z.enum(['auto', 'confirm']).default('auto'),
+        /** Feature tasks running at the same time. */
+        maxParallel: z.number().int().min(1).max(8).default(3),
+        /** Prefix of feature branches (`<prefix><feature>`; tasks use `<prefix><feature>--<task>`). */
+        branchPrefix: z.string().default('feature/'),
+      })
+      .strict()
+      .default({ integrate: 'auto', maxParallel: 3, branchPrefix: 'feature/' }),
     agents: z.record(agentNameSchema, agentConfigSchema).default({}),
   })
   .strict()

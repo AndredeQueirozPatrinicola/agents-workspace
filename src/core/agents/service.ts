@@ -34,6 +34,8 @@ import { displayPath, isPathInside, pathExists, writeFileExclusive } from '../..
 import { readTemplate } from '../../infrastructure/filesystem/package-root.js';
 import { confirmOrAbort } from '../../infrastructure/terminal/prompt.js';
 import { colors } from '../../infrastructure/terminal/ui.js';
+import { AccountService } from '../accounts/service.js';
+import type { Account, Effort } from '../accounts/settings.js';
 
 /**
  * Agent lifecycle: add -> spawn -> (attach | stop | spawn again) -> pr -> cleanup.
@@ -67,6 +69,10 @@ export interface SpawnOptions extends AddAgentOptions {
   files?: string[] | undefined;
   /** Internal (used by restart): relaunch even if the agent is still running. */
   restartRunning?: boolean | undefined;
+  /** Account to launch with (default: the account of the last launch, else the CLI's default login). */
+  account?: string | undefined;
+  /** Reasoning effort (default: the effort of the last launch, else the CLI's default). */
+  effort?: Effort | undefined;
 }
 
 export interface SpawnResult {
@@ -206,8 +212,24 @@ export class AgentService {
       addedToConfig = true;
       ws = await this.open();
     }
+    // Account: explicit, else the one of the last launch. The provider follows the account.
+    const previous = await ws.state.getAgent(name);
+    const accounts = new AccountService(this.deps);
+    let account: Account | null = null;
+    const accountName = options.account ?? previous?.account ?? null;
+    if (accountName) {
+      account = await accounts.require(accountName);
+      if (options.provider && account.provider !== options.provider) {
+        if (options.account) {
+          throw new AwError(`Account "${account.name}" belongs to ${account.provider}, not ${options.provider}.`, { exitCode: ExitCode.USAGE });
+        }
+        account = null; // a new provider was requested: drop the previous provider's account
+      }
+      if (account) account = await accounts.forLaunch(account.name, ws.config);
+    }
+    const effort: Effort | undefined = options.effort ?? (previous?.effort as Effort | null | undefined) ?? undefined;
     const agent = resolveAgent(ws.config, name, {
-      provider: options.provider,
+      provider: options.provider ?? account?.provider,
       branch: options.branch,
       model: options.model,
       base: options.base,
@@ -221,6 +243,8 @@ export class AgentService {
     ui.kv('Agent', name);
     ui.kv('Provider', provider.displayName + (agent.model ? ` (${agent.model})` : ''));
     ui.kv('Branch', agent.branch);
+    if (account) ui.kv('Account', account.label);
+    if (effort) ui.kv('Effort', effort);
     ui.line();
 
     ui.ok('Repository validated');
@@ -335,7 +359,7 @@ export class AgentService {
       }
 
       // 3. Task and prompt
-      const task = await loadTask(ws.configRoot, agent.task);
+      const task = await loadTask(ws.configRoot, agent.task, ws.taskRoots);
       const sendPrompt = !options.noPrompt && !options.resume && hasActionableTask(task, agent, options.prompt);
       if (task && !task.isTemplate) ui.ok(`Task loaded (${task.relativePath})`);
       else if (task?.isTemplate) {
@@ -364,6 +388,9 @@ export class AgentService {
           otherAgents: others,
           extraInstructions: options.prompt,
           files: { inbox: shared.inbox, agentInbox: shared.agentInbox, outbox: shared.outbox, inputs },
+          report: ws.featureAgents[name]
+            ? { file: path.join(shared.outbox, 'status.json'), feature: ws.featureAgents[name]?.featureTitle ?? '' }
+            : undefined,
         });
       } else if (inputs.length && options.resume) {
         ui.info(`Resuming: tell the agent about the new files, e.g. aw tell ${name} "New input files in ${displayPath(shared.agentInbox)}"`);
@@ -383,6 +410,8 @@ export class AgentService {
         resume: Boolean(options.resume),
         addDirs: [shared.root],
         command: providerConfig.command,
+        effort,
+        accountHome: account?.home ?? null,
       });
       await writeLaunchFiles(files, launch, { agent: name, providerName: provider.displayName }, prompt);
       if (relaunchInPlace) {
@@ -402,6 +431,8 @@ export class AgentService {
       await ws.state.patchAgent(name, {
         session: { backend: 'tmux', name: sessionName, startedAt: new Date().toISOString() },
         lastLaunch: { at: new Date().toISOString(), command: describeLaunch(launch), resumed: Boolean(options.resume) },
+        account: account?.name ?? null,
+        effort: effort ?? null,
       });
 
       ui.line();
@@ -610,7 +641,7 @@ export class AgentService {
       });
     }
     const agent = resolveAgent(ws.config, name);
-    const file = resolveTaskPath(ws.configRoot, agent.task);
+    const file = resolveTaskPath(ws.configRoot, agent.task, ws.taskRoots);
     const title = agent.description ?? name.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     const created = await writeFileExclusive(file, renderTaskFile(readTemplate('task.md'), { agent: name, title }));
     return { path: file, created };
@@ -718,7 +749,7 @@ export class AgentService {
       }
       let task: TaskFile | null = null;
       try {
-        task = await loadTask(ws.configRoot, agent.task);
+        task = await loadTask(ws.configRoot, agent.task, ws.taskRoots);
       } catch {
         task = null;
       }

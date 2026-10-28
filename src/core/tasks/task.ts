@@ -28,9 +28,11 @@ export interface TaskFile {
   isTemplate: boolean;
 }
 
-export function resolveTaskPath(configRoot: string, task: string): string {
+export function resolveTaskPath(configRoot: string, task: string, extraRoots: readonly string[] = []): string {
   const base = path.join(configRoot, CONFIG_DIR);
   const resolved = path.resolve(base, task);
+  // Feature task files live in the runtime state directory (absolute paths, never from workspace.yaml).
+  if (path.isAbsolute(task) && extraRoots.some((root) => isPathInside(resolved, root))) return resolved;
   if (!isPathInside(resolved, configRoot)) {
     throw new AwError(`Task path "${task}" points outside the repository.`, {
       exitCode: ExitCode.USAGE,
@@ -84,13 +86,13 @@ export function parseTask(content: string): Pick<TaskFile, 'title' | 'sections' 
   return { title, sections, files, isTemplate: content.includes(TEMPLATE_MARKER) };
 }
 
-export async function loadTask(configRoot: string, task: string): Promise<TaskFile | null> {
-  const file = resolveTaskPath(configRoot, task);
+export async function loadTask(configRoot: string, task: string, extraRoots: readonly string[] = []): Promise<TaskFile | null> {
+  const file = resolveTaskPath(configRoot, task, extraRoots);
   const content = await readTextIfExists(file);
   if (content === null) return null;
   return {
     path: file,
-    relativePath: path.relative(configRoot, file).split(path.sep).join('/'),
+    relativePath: isPathInside(file, configRoot) ? path.relative(configRoot, file).split(path.sep).join('/') : file,
     content,
     ...parseTask(content),
   };

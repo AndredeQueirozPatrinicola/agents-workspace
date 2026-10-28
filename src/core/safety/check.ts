@@ -65,7 +65,7 @@ export async function runSafetyCheck(deps: Deps, service: AgentService, options:
   // 2. Declared scope overlaps (config `scope` + task "Files" section)
   const scopes: Record<string, string[]> = {};
   for (const a of agents) {
-    const task = await loadTask(ws.configRoot, a.task).catch(() => null);
+    const task = await loadTask(ws.configRoot, a.task, ws.taskRoots).catch(() => null);
     const scope = [...new Set([...a.scope, ...(task && !task.isTemplate ? task.files : [])])];
     if (scope.length) scopes[a.name] = scope;
   }

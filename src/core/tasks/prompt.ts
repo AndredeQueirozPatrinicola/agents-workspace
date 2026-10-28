@@ -23,6 +23,8 @@ export interface PromptInput {
   extraInstructions?: string | undefined;
   /** Shared files area (outside the repository). */
   files?: { inbox: string; agentInbox: string; outbox: string; inputs: string[] } | undefined;
+  /** Feature tasks report completion through a status file (see ADR 0002). */
+  report?: { file: string; feature: string } | undefined;
 }
 
 export function buildAgentPrompt(input: PromptInput): string {
@@ -35,7 +37,7 @@ export function buildAgentPrompt(input: PromptInput): string {
     `- You are in an isolated Git worktree: ${input.worktreePath}`,
     `- Your branch is "${agent.branch}" (base: "${agent.base}"). Commit your work to this branch with clear messages.`,
     '- Other agents are working in parallel on other branches. Stay within your task scope; avoid unrelated refactors, renames or repository-wide formatting changes.',
-    '- Do not push, open or merge pull requests, rebase onto other agents\' branches, or rewrite history. The human integrates your work (`aw pr`).',
+    '- Do not push, open or merge pull requests, rebase onto other agents\' branches, or rewrite history. Integration is done by the human or by Agent Workspace (`aw pr`).',
     '- Never commit secrets, credentials, .env files or local runtime files.',
     '- Follow the repository conventions in AGENTS.md / CLAUDE.md when present.',
   );
@@ -75,6 +77,19 @@ export function buildAgentPrompt(input: PromptInput): string {
   }
   if (input.extraInstructions?.trim()) {
     lines.push('', 'Additional instructions:', input.extraInstructions.trim());
+  }
+  if (input.report) {
+    const file = input.report.file;
+    lines.push(
+      '',
+      `Reporting (this task is part of the feature "${input.report.feature}"; Agent Workspace integrates it automatically):`,
+      '- Work autonomously. Do not stop to ask for confirmation of routine decisions; make reasonable choices and mention them in your summary.',
+      `- When the task is complete: commit ALL your changes (the worktree must be clean), run the validation commands, then write this JSON to ${file}:`,
+      '  {"status": "done", "summary": "<what you did, decisions taken, anything the reviewer should check>"}',
+      `- If you cannot continue without a human decision, write this JSON to ${file} and wait for an answer in this terminal:`,
+      '  {"status": "blocked", "summary": "<where you are>", "questions": ["<question 1>", "..."]}',
+      '- Write the file only at those two moments. If validation later fails or a merge conflict appears, you will be told here: fix it, commit, and write the status file again.',
+    );
   }
   lines.push('', 'Begin by briefly outlining your plan, then implement it. Run the validation commands from the task before reporting completion.');
   const prompt = lines.join('\n');

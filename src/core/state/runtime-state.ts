@@ -54,6 +54,10 @@ const agentRecordSchema = z.object({
     })
     .optional(),
   pr: prSchema.optional(),
+  /** Account the agent was last launched with (null: the CLI's default login). */
+  account: z.string().nullable().optional(),
+  /** Reasoning effort the agent was last launched with. */
+  effort: z.string().nullable().optional(),
 });
 
 const stateSchema = z.object({
